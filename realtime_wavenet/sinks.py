@@ -36,9 +36,16 @@ class FileSink(AudioSink):
         self.path = path
         self.sr = sample_rate
         self._chunks = []
+        self._n = 0
+
+    @property
+    def n_samples(self) -> int:
+        return self._n
 
     def write(self, samples: np.ndarray) -> None:
-        self._chunks.append(np.asarray(samples, dtype=np.float32))
+        samples = np.asarray(samples, dtype=np.float32)
+        self._chunks.append(samples)
+        self._n += len(samples)
 
     def close(self) -> None:
         if self._chunks:
