@@ -25,23 +25,23 @@ import time
 def build_args():
     parser = argparse.ArgumentParser(description='WaveNet online en tiempo real.')
 
+    parser.add_argument('--device', default=None, help='"cpu", "cuda", "cuda:0"... (default del Config: cpu)')
+    parser.add_argument('--duration', type=float, default=20.0, help='modo file: segundos de AUDIO a generar')
     parser.add_argument('--input', required=True, help='WAV de entrada (se lee en bucle)')
+    parser.add_argument('--iterations', type=int, default=20, help='modo batched: número de iteraciones')
+    parser.add_argument('--max-wall', type=float, default=None, help='modo file: tope de segundos de reloj (evita cuelgues)')
     parser.add_argument(
         '--mode',
         choices=['file', 'live', 'batched'],
         default='file',
         help=('modo de ejecución. "file": concurrente (3 hilos), renderiza --duration segundos de audio a --output. "live": concurrente (3 hilos), reproduce por altavoz en tiempo real hasta Ctrl-C. "batched": secuencial, ejecuta --iterations ciclos de leer/entrenar/generar --step segundos, guarda uno a uno en --out-dir/out_XXXX.wav.'),
     )
-    parser.add_argument('--output', type=pathlib.Path, default=pathlib.Path('out.wav'), help='salida en modo file')
     parser.add_argument('--out-dir', type=pathlib.Path, default=pathlib.Path('out_batched'), help='directorio de salida en modo batched')
-    parser.add_argument('--step', type=float, default=5.0, help='modo batched: segundos por iteración (X entra, X sale)')
-    parser.add_argument('--iterations', type=int, default=20, help='modo batched: número de iteraciones')
-    parser.add_argument('--duration', type=float, default=20.0, help='modo file: segundos de AUDIO a generar')
-    parser.add_argument('--max-wall', type=float, default=None, help='modo file: tope de segundos de reloj (evita cuelgues)')
-    parser.add_argument('--temperature', type=float, default=None, help='sobrescribe la temperatura de muestreo')
+    parser.add_argument('--output', type=pathlib.Path, default=pathlib.Path('out.wav'), help='salida en modo file')
     parser.add_argument('--realtime-pace', action='store_true', help='fuerza a la fuente de archivo a emular el reloj')
+    parser.add_argument('--step', type=float, default=5.0, help='modo batched: segundos por iteración (X entra, X sale)')
+    parser.add_argument('--temperature', type=float, default=None, help='sobrescribe la temperatura de muestreo')
     parser.add_argument('--underrun', choices=['silence', 'hold'], default='silence')
-    parser.add_argument('--device', default=None, help='"cpu", "cuda", "cuda:0"... (default del Config: cpu)')
 
     return parser.parse_args()
 
