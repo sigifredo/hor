@@ -1,19 +1,24 @@
 '''WaveNet causal dilatado.
 
-Dos modos de cómputo sobre los mismos pesos:
-  - WaveNet.forward: paralelo, para entrenamiento con teacher forcing. Las
-    convoluciones dilatadas no tienen dependencia secuencial en entrenamiento,
-    así que un chunk completo se procesa en una sola pasada.
-  - WaveNetGenerator.step: incremental, muestra a muestra, con caché de
-    activaciones por capa (fast-wavenet). Genera cada muestra reutilizando el
-    cómputo previo en vez de recomputar el campo receptivo entero.
+Dos rutas de cómputo sobre los mismos pesos:
+  - WaveNet.forward (torch): paralelo, para entrenamiento con teacher forcing.
+    Las convoluciones dilatadas no tienen dependencia secuencial en
+    entrenamiento, así que un chunk completo se procesa en una sola pasada.
+  - WaveNetGenerator (numpy, CPU): incremental, muestra a muestra, con caché de
+    activaciones por capa (fast-wavenet) y pesos fusionados.
+
+La generación autoregresiva es secuencial por naturaleza: no se puede
+paralelizar sobre el tiempo. En GPU cada muestra paga ~50 lanzamientos de
+kernel más una sincronización GPU->CPU (el muestreo necesita el índice en
+Python), y ese overhead fijo domina por completo el cómputo de un modelo de
+este tamaño (matrices 64x64). Por eso el generador vive en CPU y en NumPy:
+matvecs pequeños sin dispatch de framework.
 '''
 
 from .config import Config
 from .mu_law import SILENCE_INDEX
 
-import collections
-import copy
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -35,6 +40,7 @@ class WaveNet(nn.Module):
         self.gate_convs = nn.ModuleList()
         self.residual_convs = nn.ModuleList()
         self.skip_convs = nn.ModuleList()
+
         for d in self.dilations:
             self.filter_convs.append(nn.Conv1d(cfg.residual_channels, cfg.dilation_channels, cfg.kernel_size, dilation=d))
             self.gate_convs.append(nn.Conv1d(cfg.residual_channels, cfg.dilation_channels, cfg.kernel_size, dilation=d))
@@ -67,80 +73,144 @@ class WaveNet(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
 
-def clone_for_inference(model: WaveNet) -> WaveNet:
-    '''Copia congelada e independiente para el hilo de generación.
-    Ejecuta en el hilo de entrenamiento, fuera de la ruta de tiempo real.'''
-    m = copy.deepcopy(model)
-    m.eval()
+def cpu_state_dict(model: WaveNet) -> dict:
+    '''Instantánea de pesos en CPU, fuera del grafo de autograd.
 
-    for p in m.parameters():
-        p.requires_grad_(False)
-
-    return m
+    Reemplaza el deepcopy del modelo completo: publicar pesos al generador es
+    copiar ~1.4 MB de tensores, no clonar un nn.Module. Ejecuta en el hilo de
+    entrenamiento, fuera de la ruta de tiempo real.'''
+    return {k: v.detach().to('cpu', copy=True) for k, v in model.state_dict().items()}
 
 
 class WaveNetGenerator:
-    '''Generación autoregresiva incremental con caché por capa.
+    '''Generación autoregresiva incremental en NumPy puro (CPU).
 
-    Mantiene una FIFO por capa de longitud igual a su dilatación, que almacena
-    las entradas pasadas a esa capa. Con kernel 2, la conv dilatada en el paso t
-    solo necesita la entrada t y la entrada t-d, así que la FIFO basta.
+    Por capa mantiene un ring buffer de longitud d con las entradas pasadas a
+    esa capa. Con kernel 2, la conv dilatada en el paso t solo necesita la
+    entrada t y la entrada t-d, así que el ring basta.
 
-    El puntero `model` puede reasignarse en caliente (swap atómico de pesos).
-    Las cachés persisten a través del swap: cada commit introduce un transitorio
-    perceptible, tratado como material sonoro, no como artefacto a suprimir.'''
+    Los pesos llegan por load_state() (instantánea CPU de state_dict) y se
+    fusionan una sola vez por publicación:
+      - filtro y compuerta, sobre {past, cur}, en una matriz (2*dil, 2*res)
+      - skip y residual en una matriz (skip+res, dil)
+    Resultado: 2 matvecs por capa + 2 de salida por muestra, sin dispatch de
+    framework. El muestreo usa Gumbel-max (equivalente exacto a multinomial
+    sobre softmax(logits/T)) con ruido pregenerado por bloques.
 
-    def __init__(self, model: WaveNet):
-        self.model = model
-        self.dilations = model.dilations
-        self.residual_channels = model.residual_channels
-        self.skip_channels = model.skip_channels
+    Las cachés persisten a través de cada load_state: cada publicación de
+    pesos introduce un transitorio perceptible, tratado como material sonoro,
+    no como artefacto a suprimir. `version` permite al hilo de generación
+    recargar pesos solo cuando realmente cambiaron.'''
+
+    def __init__(self, cfg: Config):
+        assert cfg.kernel_size == 2, 'el generador incremental asume kernel 2'
+        self.dilations = list(cfg.dilations)
+        self.res = cfg.residual_channels
+        self.dil = cfg.dilation_channels
+        self.skip = cfg.skip_channels
+        self.quant = cfg.quant_levels
+        self.version = -1
         self.last_idx = SILENCE_INDEX
-        self.reset_caches()
+        self.rings = [np.zeros((d, self.res), dtype=np.float32) for d in self.dilations]
+        self.ptrs = [0] * len(self.dilations)
 
-    @property
-    def device(self):
-        return next(self.model.parameters()).device
-
-    def reset_caches(self):
-        dev = self.device
-        self.queues = [collections.deque([torch.zeros(self.residual_channels, device=dev) for _ in range(d)], maxlen=d) for d in self.dilations]
+    def reset_caches(self) -> None:
+        for r in self.rings:
+            r.fill(0.0)
+        self.ptrs = [0] * len(self.dilations)
         self.last_idx = SILENCE_INDEX
 
-    @torch.no_grad()
+    def load_state(self, state: dict, version: int | None = None) -> None:
+        '''Extrae y fusiona pesos desde un state_dict en CPU. Las cachés no se
+        tocan (continuidad sonora a través del swap).'''
+
+        def f32(key):
+            return state[key].detach().cpu().numpy().astype(np.float32, copy=True)
+
+        self.embed_w = np.ascontiguousarray(f32('embed.weight'))  # (Q, res)
+        self.W_fg, self.b_fg, self.W_sr, self.b_sr = [], [], [], []
+
+        for i in range(len(self.dilations)):
+            fw = f32(f'filter_convs.{i}.weight')  # (dil, res, 2): [:, :, 0]=t-d, [:, :, 1]=t
+            gw = f32(f'gate_convs.{i}.weight')
+            # Columnas: [past | cur]; filas: [filtro | compuerta].
+            top = np.concatenate((fw[:, :, 0], fw[:, :, 1]), axis=1)
+            # Sigmoide vía tanh: sig(x) = 0.5*(1+tanh(0.5*x)). El 0.5 interior
+            # se pliega aquí en pesos y sesgo de compuerta, de modo que en
+            # generate() basta UN tanh sobre el vector [filtro|compuerta].
+            bot = 0.5 * np.concatenate((gw[:, :, 0], gw[:, :, 1]), axis=1)
+            self.W_fg.append(np.ascontiguousarray(np.concatenate((top, bot), axis=0)))
+            self.b_fg.append(np.concatenate((f32(f'filter_convs.{i}.bias'), 0.5 * f32(f'gate_convs.{i}.bias'))))
+
+            sw = f32(f'skip_convs.{i}.weight')[:, :, 0]  # (skip, dil)
+            rw = f32(f'residual_convs.{i}.weight')[:, :, 0]  # (res, dil)
+            self.W_sr.append(np.ascontiguousarray(np.concatenate((sw, rw), axis=0)))
+            self.b_sr.append(np.concatenate((f32(f'skip_convs.{i}.bias'), f32(f'residual_convs.{i}.bias'))))
+
+        self.W_o1 = np.ascontiguousarray(f32('out_conv1.weight')[:, :, 0])
+        self.b_o1 = f32('out_conv1.bias')
+        self.W_o2 = np.ascontiguousarray(f32('out_conv2.weight')[:, :, 0])
+        self.b_o2 = f32('out_conv2.bias')
+
+        if version is not None:
+            self.version = version
+
+    def generate(self, n: int, temperature: float = 1.0) -> np.ndarray:
+        '''Genera n índices mu-law (int64) actualizando el estado interno.'''
+        out = np.empty(n, dtype=np.int64)
+        inv_t = np.float32(1.0 / max(temperature, 1e-3))
+        S = self.skip
+        D = self.dil
+        L = len(self.dilations)
+        # Buffers reutilizados: el costo por muestra lo domina el overhead de
+        # intérprete + despacho de numpy, así que se minimizan llamadas y allocs.
+        pc = np.empty(2 * self.res, dtype=np.float32)  # [past | cur]
+        fg = np.empty(2 * D, dtype=np.float32)
+        sr = np.empty(S + self.res, dtype=np.float32)
+        noise = np.empty((0, self.quant), dtype=np.float32)
+        noise_i = 0
+
+        for j in range(n):
+            if noise_i >= len(noise):  # ruido Gumbel por bloques (amortiza el RNG)
+                noise = np.random.gumbel(size=(min(2048, n - j), self.quant)).astype(np.float32)
+                noise_i = 0
+
+            h = self.embed_w[self.last_idx]
+            skip_total = np.zeros(S, dtype=np.float32)
+
+            for i in range(L):
+                ring = self.rings[i]
+                p = self.ptrs[i]
+                pc[: self.res] = ring[p]  # entrada t-d (más antigua)
+                pc[self.res :] = h
+                np.matmul(self.W_fg[i], pc, out=fg)
+                fg += self.b_fg[i]
+                np.tanh(fg, out=fg)  # compuerta ya escalada 0.5 en load_state
+                z = fg[:D] * (0.5 + 0.5 * fg[D:])  # tanh(f) * sigmoide(g)
+
+                np.matmul(self.W_sr[i], z, out=sr)
+                sr += self.b_sr[i]
+                skip_total += sr[:S]
+
+                ring[p] = h  # empuja entrada t (sobrescribe la más antigua)
+                self.ptrs[i] = (p + 1) % self.dilations[i]
+                h = h + sr[S:]  # residual -> siguiente capa
+
+            np.maximum(skip_total, 0.0, out=skip_total)
+            o = self.W_o1 @ skip_total
+            o += self.b_o1
+            np.maximum(o, 0.0, out=o)
+            logits = self.W_o2 @ o
+            logits += self.b_o2
+
+            # Gumbel-max == muestrear de softmax(logits / T).
+            idx = int(np.argmax(logits * inv_t + noise[noise_i]))
+            noise_i += 1
+            self.last_idx = idx
+            out[j] = idx
+
+        return out
+
     def step(self, temperature: float = 1.0) -> int:
-        '''Genera un índice mu-law y actualiza el estado interno.'''
-        m = self.model
-        dev = next(m.parameters()).device
-        idx = torch.tensor([self.last_idx], dtype=torch.long, device=dev)
-        h = m.embed(idx).squeeze(0)  # (residual_channels,)
-        skip_total = torch.zeros(self.skip_channels, device=dev)
-
-        for i, d in enumerate(self.dilations):
-            past = self.queues[i][0]  # entrada t-d (más antigua)
-            fw = m.filter_convs[i].weight  # (dil, res, 2)
-            gw = m.gate_convs[i].weight
-            f = torch.tanh(fw[:, :, 0] @ past + fw[:, :, 1] @ h + m.filter_convs[i].bias)
-            g = torch.sigmoid(gw[:, :, 0] @ past + gw[:, :, 1] @ h + m.gate_convs[i].bias)
-            z = f * g  # (dilation_channels,)
-
-            sw = m.skip_convs[i].weight  # (skip, dil, 1)
-            skip_total = skip_total + sw[:, :, 0] @ z + m.skip_convs[i].bias
-            rw = m.residual_convs[i].weight  # (res, dil, 1)
-            res = rw[:, :, 0] @ z + m.residual_convs[i].bias
-
-            self.queues[i].append(h)  # empuja entrada t
-            h = h + res  # residual -> siguiente capa
-
-        out = torch.relu(skip_total)
-        o1 = m.out_conv1.weight
-        out = torch.relu(o1[:, :, 0] @ out + m.out_conv1.bias)
-        o2 = m.out_conv2.weight
-        logits = o2[:, :, 0] @ out + m.out_conv2.bias  # (quant_levels,)
-
-        t = max(temperature, 1e-3)
-        probs = torch.softmax(logits / t, dim=0)
-        sampled = int(torch.multinomial(probs, 1).item())
-        self.last_idx = sampled
-
-        return sampled
+        '''Compatibilidad: genera un solo índice.'''
+        return int(self.generate(1, temperature)[0])
