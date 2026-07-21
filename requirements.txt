@@ -1,5 +1,6 @@
 numpy>=1.24
 torch>=2.0
+tqdm
 soundfile>=0.12
 soxr>=0.3        # resampleo; alternativa: scipy (fallback automático)
 sounddevice>=0.4 # solo para el modo 'live'

@@ -22,6 +22,7 @@ import praxis.log as log
 import soundfile as sf
 import time
 import torch
+import tqdm
 
 from core.checkpoint import load_checkpoint, save_checkpoint
 from core.engine import train_step
@@ -63,7 +64,6 @@ def main() -> int:
         cfg = dataclasses.replace(cfg, device=args.device)
 
     steps = args.steps
-
     if steps == 0:
         steps, per_pass, duration = auto_steps(args.input, cfg, args.passes)
         log.info(f'steps automático: {steps} ({args.passes} pasadas x {per_pass} pasos/pasada; ' f'archivo de {duration / 60:.1f} min)')
@@ -83,10 +83,12 @@ def main() -> int:
     model.train()
     step = step0
     loss_val = float('nan')
+    reloj_str = '?'
     last_t = time.perf_counter()
 
     try:
-        for step in range(step0 + 1, step0 + steps + 1):
+        bar = tqdm.tqdm(range(step0 + 1, step0 + steps + 1), desc='preentrenamiento', unit='paso')
+        for step in bar:
             chunk_mu = mu_law_encode(source.read(cfg.chunk_len), cfg.mu)
             x = torch.from_numpy(chunk_mu).long().unsqueeze(0).to(cfg.device)
             # .item() sincroniza CUDA: la pérdida es real y el ritmo medido, honesto.
@@ -95,8 +97,10 @@ def main() -> int:
             if step % args.log_every == 0:
                 now = time.perf_counter()
                 audio_s = args.log_every * cfg.chunk_len / cfg.sample_rate
-                log.info(f'paso {step:05d}  loss={loss_val:.4f}  ' f'{audio_s / (now - last_t):.1f}x audio/reloj')
+                reloj_str = f'{audio_s / (now - last_t):.1f}x'
                 last_t = now
+
+            bar.set_postfix(loss=f'{loss_val:.4f}', reloj=reloj_str)
     except KeyboardInterrupt:
         log.error('Interrumpido; guardando checkpoint...')
 
