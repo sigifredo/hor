@@ -37,6 +37,11 @@ def build_args():
 
 def main() -> int:
     args = build_args()
+
+    if not args.checkpoint.is_file():
+        log.error(f'El archivo de checkpoint no es válido: {args.checkpoint}')
+        return 1
+
     cfg = core.Config()
     temperature = args.temperature if args.temperature is not None else cfg.temperature
 
@@ -66,13 +71,13 @@ def main() -> int:
         log.error('Interrumpido; escribiendo el audio generado hasta ahora...')
 
     if not chunks:
-        log.error('nada que escribir')
-        return 1
+        log.error('Nada que escribir')
+        return 2
 
     audio = np.concatenate(chunks)
     sf.write(str(args.out), audio, cfg.sample_rate)
     log.info(f'Salida escrita en {args.out} ({len(audio) / cfg.sample_rate:.2f}s de audio)')
-    log.info(f'Tiempo de entrenamiento: {time.perf_counter() - t0}s')
+    log.info(f'Tiempo de generación: {time.perf_counter() - t0:.02f}s')
 
     return 0
 
