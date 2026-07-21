@@ -10,14 +10,14 @@ import soundfile as sf
 
 def main() -> int:
     parser = argparse.ArgumentParser(description='WaveNet online en tiempo real.')
-    parser.add_argument('out_file', type=pathlib.Path, default=pathlib.Path('test.wav'), help='Archivo de salida')
+    parser.add_argument('out_file', type=pathlib.Path, help='Archivo de salida')
     args = parser.parse_args()
 
-    if not args.out_file.is_file():
+    if args.out_file.is_file():
         log.error(f'El archivo de salida es inválido: {args.out_file}')
         return 1
 
-    sr = 16000
+    sr = 16_000
     dur = 4.0
     t = np.linspace(0, dur, int(sr * dur), endpoint=False)
     f0 = 110.0 * 2 ** (2 * t / dur)  # barrido de 110 Hz a 2 octavas
