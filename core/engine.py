@@ -15,16 +15,15 @@ generación ve pesos viejos o nuevos, nunca un estado a medias.
 Contrapresión: la cola de chunks es acotada (queue_maxsize). Con archivo, el
 pacing lo impone el throughput de entrenamiento, no el reloj de pared.'''
 
-import queue
-import threading
-
-import numpy as np
-import torch
-import torch.nn.functional as F
-
 from .config import Config
 from .model import WaveNet, WaveNetGenerator, clone_for_inference
 from .mu_law import mu_law_encode, mu_law_decode
+
+import numpy as np
+import queue
+import threading
+import torch
+import torch.nn.functional as F
 
 
 class SharedWeights:

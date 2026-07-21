@@ -2,16 +2,16 @@
 
 Ejemplos:
   # Modo archivo (headless, escribe WAV). --duration = segundos de AUDIO.
-  python -m realtime_wavenet.main --input in.wav --mode file \
+  python main.py --input in.wav --mode file \
       --duration 10 --output out.wav
 
   # En GPU (acelera el entrenamiento; la generación puede no acelerar hasta
   # que se compile o se genere en lotes):
-  python -m realtime_wavenet.main --input in.wav --mode file \
+  python main.py --input in.wav --mode file \
       --duration 10 --device cuda
 
   # Modo vivo (reproduce en tiempo real). Ctrl-C para detener.
-  python -m realtime_wavenet.main --input in.wav --mode live
+  python main.py --input in.wav --mode live
 '''
 
 import argparse

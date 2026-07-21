@@ -5,10 +5,10 @@ cerradas. Los parámetros de sistema (chunk_len, queue_maxsize, gen_block,
 blocksize) son perillas de ejecución: su valor óptimo depende del wall-clock
 medido en la máquina concreta, no de la arquitectura.'''
 
-from dataclasses import dataclass
+import dataclasses
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class Config:
     # --- Representación de la señal ---
     sample_rate: int = 16000  # mono

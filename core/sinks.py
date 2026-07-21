@@ -15,17 +15,15 @@ alcanzable; esta es la versión experimental v1 acordada (threading + buffers
 generosos). El escape estructural, si la contención resulta audible, es
 multiprocessing.'''
 
-import threading
-from abc import ABC, abstractmethod
-
+import abc
 import numpy as np
 import soundfile as sf
+import threading
 
 
-class AudioSink(ABC):
-    @abstractmethod
-    def write(self, samples: np.ndarray) -> None:
-        ...
+class AudioSink(abc.ABC):
+    @abc.abstractmethod
+    def write(self, samples: np.ndarray) -> None: ...
 
     def close(self) -> None:
         pass
@@ -53,9 +51,9 @@ class FileSink(AudioSink):
 
 
 class LiveSink(AudioSink):
-    def __init__(self, sample_rate: int, capacity: int,
-                 blocksize: int = 1024, underrun: str = 'silence'):
+    def __init__(self, sample_rate: int, capacity: int, blocksize: int = 1024, underrun: str = 'silence'):
         import sounddevice as sd
+
         self.sr = sample_rate
         self.cap = capacity
         self.buf = np.zeros(capacity, dtype=np.float32)
@@ -63,42 +61,49 @@ class LiveSink(AudioSink):
         self.wpos = 0
         self.count = 0
         self.cond = threading.Condition()
-        self.underrun = underrun          # 'silence' o 'hold'
+        self.underrun = underrun  # 'silence' o 'hold'
         self.last = 0.0
-        self.stream = sd.OutputStream(
-            samplerate=sample_rate, channels=1,
-            blocksize=blocksize, callback=self._callback)
+        self.stream = sd.OutputStream(samplerate=sample_rate, channels=1, blocksize=blocksize, callback=self._callback)
         self.stream.start()
 
     def _callback(self, outdata, frames, time_info, status):
         with self.cond:
             n = min(frames, self.count)
+
             if n > 0:
                 first = min(n, self.cap - self.rpos)
-                outdata[:first, 0] = self.buf[self.rpos:self.rpos + first]
+                outdata[:first, 0] = self.buf[self.rpos : self.rpos + first]
+
                 if first < n:
-                    outdata[first:n, 0] = self.buf[:n - first]
+                    outdata[first:n, 0] = self.buf[: n - first]
+
                 self.rpos = (self.rpos + n) % self.cap
                 self.count -= n
                 self.last = float(outdata[n - 1, 0])
-            if n < frames:                # underrun
+
+            if n < frames:  # underrun
                 fill = 0.0 if self.underrun == 'silence' else self.last
                 outdata[n:, 0] = fill
+
             self.cond.notify()
 
     def write(self, samples: np.ndarray) -> None:
         samples = np.asarray(samples, dtype=np.float32)
         i = 0
+
         with self.cond:
             while i < len(samples):
                 while self.count >= self.cap:
                     self.cond.wait()
+
                 space = self.cap - self.count
                 k = min(space, len(samples) - i)
                 first = min(k, self.cap - self.wpos)
-                self.buf[self.wpos:self.wpos + first] = samples[i:i + first]
+                self.buf[self.wpos : self.wpos + first] = samples[i : i + first]
+
                 if first < k:
-                    self.buf[:k - first] = samples[i + first:i + k]
+                    self.buf[: k - first] = samples[i + first : i + k]
+
                 self.wpos = (self.wpos + k) % self.cap
                 self.count += k
                 i += k
