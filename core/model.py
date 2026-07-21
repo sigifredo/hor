@@ -101,10 +101,15 @@ class WaveNetGenerator:
         self.last_idx = SILENCE_INDEX
         self.reset_caches()
 
+    @property
+    def device(self):
+        return next(self.model.parameters()).device
+
     def reset_caches(self):
+        dev = self.device
         self.queues = [
-            deque([torch.zeros(self.residual_channels) for _ in range(d)],
-                  maxlen=d)
+            deque([torch.zeros(self.residual_channels, device=dev)
+                   for _ in range(d)], maxlen=d)
             for d in self.dilations
         ]
         self.last_idx = SILENCE_INDEX
@@ -113,9 +118,10 @@ class WaveNetGenerator:
     def step(self, temperature: float = 1.0) -> int:
         '''Genera un índice mu-law y actualiza el estado interno.'''
         m = self.model
-        idx = torch.tensor([self.last_idx], dtype=torch.long)
+        dev = next(m.parameters()).device
+        idx = torch.tensor([self.last_idx], dtype=torch.long, device=dev)
         h = m.embed(idx).squeeze(0)                   # (residual_channels,)
-        skip_total = torch.zeros(self.skip_channels)
+        skip_total = torch.zeros(self.skip_channels, device=dev)
 
         for i, d in enumerate(self.dilations):
             past = self.queues[i][0]                  # entrada t-d (más antigua)

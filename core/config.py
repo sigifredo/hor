@@ -33,6 +33,9 @@ class Config:
     out_capacity: int = 16000  # capacidad del ring de salida (LiveSink)
     blocksize: int = 1024  # frames por callback de salida (LiveSink)
 
+    # --- Cómputo ---
+    device: str = 'cpu'  # 'cpu' o 'cuda' (o 'cuda:0', etc.)
+
     @property
     def dilations(self) -> list:
         return [2**i for i in range(self.n_layers)]
