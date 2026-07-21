@@ -7,3 +7,4 @@ from .config import Config
 from .sources import make_source
 from .engine import Engine, run_batched
 from .sinks import FileSink, LiveSink
+from .checkpoint import save_checkpoint, load_checkpoint

@@ -17,6 +17,7 @@ nunca un estado a medias.
 Contrapresión: la cola de chunks es acotada (queue_maxsize). Con archivo, el
 pacing lo impone el throughput de entrenamiento, no el reloj de pared.'''
 
+from .checkpoint import load_checkpoint
 from .config import Config
 from .model import WaveNet, WaveNetGenerator, cpu_state_dict
 from .mu_law import mu_law_encode, mu_law_decode
@@ -66,21 +67,24 @@ def accumulator_loop(source, chunk_queue, stop_event, cfg: Config):
                 continue
 
 
-def _train_step(model, optimizer, x, cfg: Config):
-    '''Un paso de Adam sobre una ventana (1, T). Devuelve la pérdida.'''
+def train_step(model, optimizer, x, cfg: Config):
+    '''Un paso de Adam sobre una ventana (1, T). Devuelve la pérdida.
+    Compartido por training_loop, run_batched y pretrain.py.'''
     logits = model(x)  # (1, Q, T)
     w = cfg.loss_warmup
     pred = logits[:, :, :-1][:, :, w:]  # predice t+1 desde t
     target = x[:, 1:][:, w:]
-    loss = F.cross_entropy(pred.reshape(-1, cfg.quant_levels), target.reshape(-1))
+    # F.cross_entropy acepta (B, C, T) con target (B, T) directamente.
+    # NUNCA reshape(-1, C) sobre (B, C, T): reinterpreta la memoria mezclando
+    # clases y tiempo, y produce un objetivo sin sentido que aun así "baja".
+    loss = F.cross_entropy(pred, target)
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
     return loss
 
 
-def training_loop(chunk_queue, train_model, shared, stop_event, cfg: Config, on_round=None):
-    optimizer = torch.optim.Adam(train_model.parameters(), lr=cfg.lr)
+def training_loop(chunk_queue, train_model, optimizer, shared, stop_event, cfg: Config, on_round=None):
     round_idx = 0
     while not stop_event.is_set():
         try:
@@ -90,7 +94,7 @@ def training_loop(chunk_queue, train_model, shared, stop_event, cfg: Config, on_
 
         dev = next(train_model.parameters()).device
         x = torch.from_numpy(chunk).long().unsqueeze(0).to(dev)  # (1, T)
-        loss = _train_step(train_model, optimizer, x, cfg)
+        loss = train_step(train_model, optimizer, x, cfg)
 
         shared.set(cpu_state_dict(train_model))  # publicación versionada
         round_idx += 1
@@ -110,11 +114,18 @@ def generation_loop(shared, generator, sink, stop_event, cfg: Config):
 class Engine:
     '''Arma y controla los tres hilos sobre una fuente y un sink dados.'''
 
-    def __init__(self, cfg: Config, source, sink):
+    def __init__(self, cfg: Config, source, sink, checkpoint=None):
         self.cfg = cfg
         self.source = source
         self.sink = sink
         self.train_model = WaveNet(cfg).to(cfg.device)
+        self.optimizer = torch.optim.Adam(self.train_model.parameters(), lr=cfg.lr)
+
+        if checkpoint is not None:
+            load_checkpoint(checkpoint, self.train_model, self.optimizer, cfg)
+
+        # La instantánea inicial se toma DESPUÉS de cargar el checkpoint: la
+        # generación arranca desde los pesos preentrenados, no desde ruido.
         self.shared = SharedWeights(cpu_state_dict(self.train_model))
         self.generator = WaveNetGenerator(cfg)
         version, state = self.shared.get()
@@ -126,7 +137,7 @@ class Engine:
     def start(self, on_round=None):
         specs = [
             (accumulator_loop, (self.source, self.chunk_queue, self.stop_event, self.cfg)),
-            (training_loop, (self.chunk_queue, self.train_model, self.shared, self.stop_event, self.cfg, on_round)),
+            (training_loop, (self.chunk_queue, self.train_model, self.optimizer, self.shared, self.stop_event, self.cfg, on_round)),
             (generation_loop, (self.shared, self.generator, self.sink, self.stop_event, self.cfg)),
         ]
         for fn, args in specs:
@@ -142,17 +153,17 @@ class Engine:
         self.sink.close()
 
 
-def run_batched(cfg: Config, source, out_dir, step_seconds: float, iterations: int, on_iter=None):
+def run_batched(cfg: Config, source, out_dir, step_seconds: float, iterations: int, on_iter=None, checkpoint=None):
     '''Modo secuencial con paridad temporal.
 
     Cada iteración: lee step_seconds del source, entrena UNA RONDA POR VENTANA
     de chunk_len dentro de ese chunk (con step=5 s y chunk_len=1 s son 5 pasos
     de Adam por iteración), genera step_seconds con el generador NumPy, guarda
-    'out_XXXX.wav'. La pérdida reportada es el promedio de las ventanas.
+    'out_XXXX.wav'. La pérdida reportada es el promedio de las ventanas. Con
+    `checkpoint` parte de un preentrenamiento (pretrain.py) en vez de cero.
 
     Las cachés del generador se conservan entre iteraciones (continuidad
     sonora + pequeño transitorio audible en cada publicación de pesos).'''
-
     import time
     from pathlib import Path
     import soundfile as sf
@@ -163,6 +174,10 @@ def run_batched(cfg: Config, source, out_dir, step_seconds: float, iterations: i
     n = int(step_seconds * cfg.sample_rate)
     model = WaveNet(cfg).to(cfg.device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
+
+    if checkpoint is not None:
+        load_checkpoint(checkpoint, model, optimizer, cfg)
+
     generator = WaveNetGenerator(cfg)
 
     for i in range(iterations):
@@ -181,7 +196,7 @@ def run_batched(cfg: Config, source, out_dir, step_seconds: float, iterations: i
             xw = x_all[s : s + cfg.chunk_len].unsqueeze(0)
             if xw.shape[1] <= cfg.loss_warmup + 1:
                 break  # cola sin contexto suficiente
-            loss = _train_step(model, optimizer, xw, cfg)
+            loss = train_step(model, optimizer, xw, cfg)
             losses.append(float(loss.item()))
         _cuda_sync(cfg.device)
         t_train = time.perf_counter() - t0

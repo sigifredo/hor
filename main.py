@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 '''Punto de entrada.
 
 Ejemplos:
@@ -27,6 +26,7 @@ import time
 def build_args():
     parser = argparse.ArgumentParser(description='WaveNet online en tiempo real.')
 
+    parser.add_argument('--checkpoint', type=pathlib.Path, default=None, help='checkpoint de pretrain.py; si se omite, parte de cero')
     parser.add_argument('--device', default=None, help='"cpu", "cuda", "cuda:0"... (default del Config: cpu)')
     parser.add_argument('--duration', type=float, default=20.0, help='modo file: segundos de AUDIO a generar')
     parser.add_argument('--input', required=True, help='WAV de entrada (se lee en bucle)')
@@ -60,6 +60,9 @@ def main() -> int:
 
     source = core.make_source('file', path=args.input, target_sr=cfg.sample_rate, realtime_pace=args.realtime_pace)
 
+    if args.checkpoint is not None:
+        log.info(f'partiendo del checkpoint {args.checkpoint}')
+
     if args.mode == 'batched':
         log.info(f'Modo batched | device: {cfg.device} | step: {args.step}s ' f'| iteraciones: {args.iterations} | out_dir: {args.out_dir}')
 
@@ -69,7 +72,7 @@ def main() -> int:
             log.info(f'iter {i:04d}  loss={loss:.4f}  ' f'read={t_r:.2f}s  train={t_t:.2f}s  gen={t_g:.2f}s  ' f'| total={total:.2f}s vs target={target:.1f}s ' f'({factor:.1f}x reloj)  -> {path}')
 
         start_time = time.perf_counter()
-        core.run_batched(cfg, source, args.out_dir, args.step, args.iterations, on_iter=on_iter)
+        core.run_batched(cfg, source, args.out_dir, args.step, args.iterations, on_iter=on_iter, checkpoint=args.checkpoint)
         log.info(f'Duración de run_batched: {time.perf_counter() - start_time:.6f} segundos')
 
         return 0
@@ -79,7 +82,7 @@ def main() -> int:
     else:
         sink = core.LiveSink(cfg.sample_rate, cfg.out_capacity, blocksize=cfg.blocksize, underrun=args.underrun)
 
-    engine = core.Engine(cfg, source, sink)
+    engine = core.Engine(cfg, source, sink, checkpoint=args.checkpoint)
     log.info(f'Modelo: {engine.train_model.param_count():,} parámetros ' f'| campo receptivo: {cfg.receptive_field} muestras ' f'({cfg.receptive_field / cfg.sample_rate * 1000:.0f} ms) ' f'| device: {cfg.device}')
 
     def on_round(i, loss):
