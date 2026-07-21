@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 '''Preentrenamiento offline.
 
 Recorre el WAV en bucle dando pasos de Adam sobre ventanas de chunk_len y
