@@ -9,14 +9,17 @@ mismos pesos), así que un preentrenamiento largo puede partirse en sesiones.
 Ejemplos:
   python pretrain.py --input in.wav --steps 5000 --device cuda --out ckpt.pt
   python pretrain.py --input in.wav --steps 5000 --resume ckpt.pt --out ckpt.pt
+  python pretrain.py --input in.wav --steps 0 --passes 4 --device cuda --out ckpt.pt
   python main.py --input in.wav --mode batched --checkpoint ckpt.pt ...
 '''
 
 import argparse
 import core
 import dataclasses
+import math
 import pathlib
 import praxis.log as log
+import soundfile as sf
 import time
 import torch
 
@@ -33,10 +36,23 @@ def build_args():
     parser.add_argument('--input', required=True, help='WAV de entrenamiento (se lee en bucle)')
     parser.add_argument('--log-every', type=int, default=50, help='pasos entre líneas de log')
     parser.add_argument('--out', type=pathlib.Path, default=pathlib.Path('checkpoint.pt'), help='ruta del checkpoint de salida')
+    parser.add_argument('--passes', type=int, default=4, help='pasadas completas al archivo cuando --steps 0')
     parser.add_argument('--resume', type=pathlib.Path, default=None, help='checkpoint previo desde el que continuar')
-    parser.add_argument('--steps', type=int, default=5000, help='pasos de Adam (1 paso = chunk_len muestras = 1 s de audio)')
+    parser.add_argument('--steps', type=int, default=5000, help='pasos de Adam (1 paso = chunk_len muestras = 1 s de audio); 0 = automático: --passes pasadas completas al archivo')
 
     return parser.parse_args()
+
+
+def auto_steps(input_path, cfg, passes: int):
+    '''Pasos para recorrer el archivo completo `passes` veces.
+
+    Un paso consume chunk_len muestras a cfg.sample_rate (1 s con el Config
+    actual). La duración se toma de la cabecera del archivo (frames / sr
+    nativo), que es invariante al remuestreo de la fuente.'''
+    info = sf.info(str(input_path))
+    duration = info.frames / info.samplerate
+    per_pass = math.ceil(duration * cfg.sample_rate / cfg.chunk_len)
+    return per_pass * passes, per_pass, duration
 
 
 def main() -> int:
@@ -45,6 +61,12 @@ def main() -> int:
 
     if args.device is not None:
         cfg = dataclasses.replace(cfg, device=args.device)
+
+    steps = args.steps
+
+    if steps == 0:
+        steps, per_pass, duration = auto_steps(args.input, cfg, args.passes)
+        log.info(f'steps automático: {steps} ({args.passes} pasadas x {per_pass} pasos/pasada; ' f'archivo de {duration / 60:.1f} min)')
 
     source = core.make_source('file', path=args.input, target_sr=cfg.sample_rate)
     model = WaveNet(cfg).to(cfg.device)
@@ -56,7 +78,7 @@ def main() -> int:
         step0 = int(meta.get('steps', 0))
         log.info(f'reanudando desde {args.resume} (pasos previos: {step0}, loss: {meta.get("loss", "?")})')
 
-    log.info(f'Preentrenamiento | device: {cfg.device} | pasos: {args.steps} ' f'| {model.param_count():,} parámetros | ventana: {cfg.chunk_len / cfg.sample_rate:.1f}s | out: {args.out}')
+    log.info(f'Preentrenamiento | device: {cfg.device} | pasos: {steps} ' f'| {model.param_count():,} parámetros | ventana: {cfg.chunk_len / cfg.sample_rate:.1f}s | out: {args.out}')
 
     model.train()
     step = step0
@@ -64,7 +86,7 @@ def main() -> int:
     last_t = time.perf_counter()
 
     try:
-        for step in range(step0 + 1, step0 + args.steps + 1):
+        for step in range(step0 + 1, step0 + steps + 1):
             chunk_mu = mu_law_encode(source.read(cfg.chunk_len), cfg.mu)
             x = torch.from_numpy(chunk_mu).long().unsqueeze(0).to(cfg.device)
             # .item() sincroniza CUDA: la pérdida es real y el ritmo medido, honesto.
