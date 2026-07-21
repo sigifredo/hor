@@ -17,7 +17,7 @@ nunca un estado a medias.
 Contrapresión: la cola de chunks es acotada (queue_maxsize). Con archivo, el
 pacing lo impone el throughput de entrenamiento, no el reloj de pared.'''
 
-from .checkpoint import load_checkpoint
+from .checkpoint import load_checkpoint, save_checkpoint
 from .config import Config
 from .model import WaveNet, WaveNetGenerator, cpu_state_dict
 from .mu_law import mu_law_encode, mu_law_decode
@@ -84,8 +84,13 @@ def train_step(model, optimizer, x, cfg: Config):
     return loss
 
 
-def training_loop(chunk_queue, train_model, optimizer, shared, stop_event, cfg: Config, on_round=None):
+def training_loop(chunk_queue, train_model, optimizer, shared, stop_event, cfg: Config, on_round=None, save_path=None, save_every=0, step0=0):
     round_idx = 0
+    loss_val = float('nan')
+
+    def save():
+        save_checkpoint(save_path, train_model, optimizer, cfg, meta={'steps': step0 + round_idx, 'loss': loss_val})
+
     while not stop_event.is_set():
         try:
             chunk = chunk_queue.get(timeout=0.5)
@@ -98,8 +103,16 @@ def training_loop(chunk_queue, train_model, optimizer, shared, stop_event, cfg: 
 
         shared.set(cpu_state_dict(train_model))  # publicación versionada
         round_idx += 1
+        loss_val = float(loss.item())
+
+        if save_path is not None and save_every > 0 and round_idx % save_every == 0:
+            save()
+
         if on_round is not None:
-            on_round(round_idx, float(loss.item()))
+            on_round(round_idx, loss_val)
+
+    if save_path is not None and round_idx > 0:
+        save()  # estado final al detener
 
 
 def generation_loop(shared, generator, sink, stop_event, cfg: Config):
@@ -114,15 +127,19 @@ def generation_loop(shared, generator, sink, stop_event, cfg: Config):
 class Engine:
     '''Arma y controla los tres hilos sobre una fuente y un sink dados.'''
 
-    def __init__(self, cfg: Config, source, sink, checkpoint=None):
+    def __init__(self, cfg: Config, source, sink, checkpoint=None, save_path=None, save_every=0):
         self.cfg = cfg
         self.source = source
         self.sink = sink
+        self.save_path = save_path
+        self.save_every = save_every
         self.train_model = WaveNet(cfg).to(cfg.device)
         self.optimizer = torch.optim.Adam(self.train_model.parameters(), lr=cfg.lr)
 
+        self._step0 = 0
         if checkpoint is not None:
-            load_checkpoint(checkpoint, self.train_model, self.optimizer, cfg)
+            meta = load_checkpoint(checkpoint, self.train_model, self.optimizer, cfg)
+            self._step0 = int(meta.get('steps', 0))
 
         # La instantánea inicial se toma DESPUÉS de cargar el checkpoint: la
         # generación arranca desde los pesos preentrenados, no desde ruido.
@@ -137,7 +154,7 @@ class Engine:
     def start(self, on_round=None):
         specs = [
             (accumulator_loop, (self.source, self.chunk_queue, self.stop_event, self.cfg)),
-            (training_loop, (self.chunk_queue, self.train_model, self.optimizer, self.shared, self.stop_event, self.cfg, on_round)),
+            (training_loop, (self.chunk_queue, self.train_model, self.optimizer, self.shared, self.stop_event, self.cfg, on_round, self.save_path, self.save_every, self._step0)),
             (generation_loop, (self.shared, self.generator, self.sink, self.stop_event, self.cfg)),
         ]
         for fn, args in specs:
@@ -153,7 +170,7 @@ class Engine:
         self.sink.close()
 
 
-def run_batched(cfg: Config, source, out_dir, step_seconds: float, iterations: int, on_iter=None, checkpoint=None):
+def run_batched(cfg: Config, source, out_dir, step_seconds: float, iterations: int, on_iter=None, checkpoint=None, save_path=None, save_every=0):
     '''Modo secuencial con paridad temporal.
 
     Cada iteración: lee step_seconds del source, entrena UNA RONDA POR VENTANA
@@ -161,6 +178,10 @@ def run_batched(cfg: Config, source, out_dir, step_seconds: float, iterations: i
     de Adam por iteración), genera step_seconds con el generador NumPy, guarda
     'out_XXXX.wav'. La pérdida reportada es el promedio de las ventanas. Con
     `checkpoint` parte de un preentrenamiento (pretrain.py) en vez de cero.
+
+    Con `save_path`, guarda el estado cada `save_every` iteraciones y siempre
+    al terminar o interrumpir (finally), acumulando los pasos del checkpoint
+    de entrada. Nunca escribe sobre `checkpoint`: son rutas independientes.
 
     Las cachés del generador se conservan entre iteraciones (continuidad
     sonora + pequeño transitorio audible en cada publicación de pesos).'''
@@ -175,44 +196,58 @@ def run_batched(cfg: Config, source, out_dir, step_seconds: float, iterations: i
     model = WaveNet(cfg).to(cfg.device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
 
+    steps_done = 0
+    mean_loss = float('nan')
     if checkpoint is not None:
-        load_checkpoint(checkpoint, model, optimizer, cfg)
+        meta = load_checkpoint(checkpoint, model, optimizer, cfg)
+        steps_done = int(meta.get('steps', 0))
 
     generator = WaveNetGenerator(cfg)
 
-    for i in range(iterations):
-        # 1. Leer step_seconds del source (simula "escuchar durante X s").
-        t0 = time.perf_counter()
-        chunk_f = source.read(n)
-        chunk_mu = mu_law_encode(chunk_f, cfg.mu)
-        t_read = time.perf_counter() - t0
+    try:
+        for i in range(iterations):
+            # 1. Leer step_seconds del source (simula "escuchar durante X s").
+            t0 = time.perf_counter()
+            chunk_f = source.read(n)
+            chunk_mu = mu_law_encode(chunk_f, cfg.mu)
+            t_read = time.perf_counter() - t0
 
-        # 2. Entrenar: un paso de Adam por ventana de chunk_len.
-        t0 = time.perf_counter()
-        model.train()
-        x_all = torch.from_numpy(chunk_mu).long().to(cfg.device)
-        losses = []
-        for s in range(0, n, cfg.chunk_len):
-            xw = x_all[s : s + cfg.chunk_len].unsqueeze(0)
-            if xw.shape[1] <= cfg.loss_warmup + 1:
-                break  # cola sin contexto suficiente
-            loss = train_step(model, optimizer, xw, cfg)
-            losses.append(float(loss.item()))
-        _cuda_sync(cfg.device)
-        t_train = time.perf_counter() - t0
+            # 2. Entrenar: un paso de Adam por ventana de chunk_len.
+            t0 = time.perf_counter()
+            model.train()
+            x_all = torch.from_numpy(chunk_mu).long().to(cfg.device)
+            losses = []
+            for s in range(0, n, cfg.chunk_len):
+                xw = x_all[s : s + cfg.chunk_len].unsqueeze(0)
+                if xw.shape[1] <= cfg.loss_warmup + 1:
+                    break  # cola sin contexto suficiente
+                loss = train_step(model, optimizer, xw, cfg)
+                losses.append(float(loss.item()))
+            _cuda_sync(cfg.device)
+            t_train = time.perf_counter() - t0
 
-        # 3. Publicar pesos al generador y generar step_seconds (CPU/NumPy).
-        t0 = time.perf_counter()
-        model.eval()
-        generator.load_state(cpu_state_dict(model))
-        block = generator.generate(n, cfg.temperature)
-        audio_out = mu_law_decode(block, cfg.mu)
-        t_gen = time.perf_counter() - t0
+            # 3. Publicar pesos al generador y generar step_seconds (CPU/NumPy).
+            t0 = time.perf_counter()
+            model.eval()
+            generator.load_state(cpu_state_dict(model))
+            block = generator.generate(n, cfg.temperature)
+            audio_out = mu_law_decode(block, cfg.mu)
+            t_gen = time.perf_counter() - t0
 
-        # 4. Guardar.
-        out_path = out_dir / f'out_{i:04d}.wav'
-        sf.write(str(out_path), audio_out, cfg.sample_rate)
+            # 4. Guardar.
+            out_path = out_dir / f'out_{i:04d}.wav'
+            sf.write(str(out_path), audio_out, cfg.sample_rate)
 
-        if on_iter is not None:
+            steps_done += len(losses)
             mean_loss = sum(losses) / max(len(losses), 1)
-            on_iter(i, mean_loss, t_read, t_train, t_gen, step_seconds, str(out_path))
+
+            if save_path is not None and save_every > 0 and (i + 1) % save_every == 0:
+                save_checkpoint(save_path, model, optimizer, cfg, meta={'steps': steps_done, 'loss': mean_loss})
+
+            if on_iter is not None:
+                on_iter(i, mean_loss, t_read, t_train, t_gen, step_seconds, str(out_path))
+    finally:
+        # Cubre el final normal y la interrupción con Ctrl-C: el último estado
+        # completo queda persistido sin tocar el checkpoint de entrada.
+        if save_path is not None and steps_done > 0:
+            save_checkpoint(save_path, model, optimizer, cfg, meta={'steps': steps_done, 'loss': mean_loss})

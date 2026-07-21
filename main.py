@@ -41,11 +41,18 @@ def build_args():
     parser.add_argument('--out-dir', type=pathlib.Path, default=pathlib.Path('out_batched'), help='directorio de salida en modo batched')
     parser.add_argument('--output', type=pathlib.Path, default=pathlib.Path('out.wav'), help='salida en modo file')
     parser.add_argument('--realtime-pace', action='store_true', help='fuerza a la fuente de archivo a emular el reloj')
+    parser.add_argument('--save-checkpoint', type=pathlib.Path, default=pathlib.Path('checkpoint_out.pt'), help='ruta donde persistir el estado durante el entrenamiento (nunca sobrescribe el de --checkpoint)')
+    parser.add_argument('--save-every', type=int, default=10, help='modo batched: iteraciones entre guardados; file/live: rondas. 0 desactiva el guardado')
     parser.add_argument('--step', type=float, default=5.0, help='modo batched: segundos por iteración (X entra, X sale)')
     parser.add_argument('--temperature', type=float, default=None, help='sobrescribe la temperatura de muestreo')
     parser.add_argument('--underrun', choices=['silence', 'hold'], default='silence')
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if args.save_every > 0 and args.checkpoint is not None and args.checkpoint.resolve() == args.save_checkpoint.resolve():
+        parser.error('--save-checkpoint no puede ser el mismo archivo que --checkpoint: el checkpoint de entrada no se reescribe. Usa otra ruta de salida.')
+
+    return args
 
 
 def main() -> int:
@@ -72,7 +79,8 @@ def main() -> int:
             log.info(f'iter {i:04d}  loss={loss:.4f}  ' f'read={t_r:.2f}s  train={t_t:.2f}s  gen={t_g:.2f}s  ' f'| total={total:.2f}s vs target={target:.1f}s ' f'({factor:.1f}x reloj)  -> {path}')
 
         start_time = time.perf_counter()
-        core.run_batched(cfg, source, args.out_dir, args.step, args.iterations, on_iter=on_iter, checkpoint=args.checkpoint)
+        save_path = args.save_checkpoint if args.save_every > 0 else None
+        core.run_batched(cfg, source, args.out_dir, args.step, args.iterations, on_iter=on_iter, checkpoint=args.checkpoint, save_path=save_path, save_every=args.save_every)
         log.info(f'Duración de run_batched: {time.perf_counter() - start_time:.6f} segundos')
 
         return 0
@@ -82,7 +90,8 @@ def main() -> int:
     else:
         sink = core.LiveSink(cfg.sample_rate, cfg.out_capacity, blocksize=cfg.blocksize, underrun=args.underrun)
 
-    engine = core.Engine(cfg, source, sink, checkpoint=args.checkpoint)
+    save_path = args.save_checkpoint if args.save_every > 0 else None
+    engine = core.Engine(cfg, source, sink, checkpoint=args.checkpoint, save_path=save_path, save_every=args.save_every)
     log.info(f'Modelo: {engine.train_model.param_count():,} parámetros ' f'| campo receptivo: {cfg.receptive_field} muestras ' f'({cfg.receptive_field / cfg.sample_rate * 1000:.0f} ms) ' f'| device: {cfg.device}')
 
     def on_round(i, loss):
