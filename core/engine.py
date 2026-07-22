@@ -80,6 +80,7 @@ def train_step(model, optimizer, x, cfg: Config):
     loss = F.cross_entropy(pred, target)
     optimizer.zero_grad()
     loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     optimizer.step()
     return loss
 

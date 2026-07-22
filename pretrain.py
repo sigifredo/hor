@@ -34,6 +34,7 @@ def build_args():
     parser = argparse.ArgumentParser(description='Preentrenamiento offline de la WaveNet.')
 
     parser.add_argument('--device', default=None, help='"cpu", "cuda", "cuda:0"... (default del Config: cpu)')
+    parser.add_argument('--history', type=pathlib.Path, default=None, help='CSV de historial step,loss; por defecto --out con extensión .csv')
     parser.add_argument('--input', required=True, help='WAV de entrenamiento (se lee en bucle)')
     parser.add_argument('--log-every', type=int, default=50, help='pasos entre líneas de log')
     parser.add_argument('--out', type=pathlib.Path, default=pathlib.Path('checkpoint.pt'), help='ruta del checkpoint de salida')
@@ -80,14 +81,19 @@ def main() -> int:
 
     log.info(f'Preentrenamiento | device: {cfg.device} | pasos: {steps} ' f'| {model.param_count():,} parámetros | ventana: {cfg.chunk_len / cfg.sample_rate:.1f}s | out: {args.out}')
 
+    history_path = args.history if args.history is not None else args.out.with_suffix('.csv')
+    log.info(f'Historial de loss: {history_path}')
+
     model.train()
     step = step0
     loss_val = float('nan')
     reloj_str = '?'
     last_t = time.perf_counter()
+    history = []
 
     try:
         bar = tqdm.tqdm(range(step0 + 1, step0 + steps + 1), desc='preentrenamiento', unit='paso')
+
         for step in bar:
             chunk_mu = mu_law_encode(source.read(cfg.chunk_len), cfg.mu)
             x = torch.from_numpy(chunk_mu).long().unsqueeze(0).to(cfg.device)
@@ -100,9 +106,16 @@ def main() -> int:
                 reloj_str = f'{audio_s / (now - last_t):.1f}x'
                 last_t = now
 
+            history.append((step, loss_val))
             bar.set_postfix(loss=f'{loss_val:.4f}', reloj=reloj_str)
     except KeyboardInterrupt:
         log.error('Interrumpido; guardando checkpoint...')
+
+    with open(history_path, 'w') as hist_f:
+        hist_f.write('step,loss\n')
+
+        for it in history:
+            hist_f.write(f'{it[0]},{it[1]}\n')
 
     save_checkpoint(args.out, model, optimizer, cfg, meta={'steps': step, 'loss': loss_val, 'input': str(args.input)})
     log.info(f'checkpoint guardado en {args.out} (pasos: {step}, loss: {loss_val:.4f})')

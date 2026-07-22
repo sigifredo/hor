@@ -16,7 +16,7 @@ class Config:
     mu: int = 255  # parámetro de compansión mu-law
 
     # --- Núcleo del modelo (definitivo) ---
-    n_layers: int = 10  # dilataciones 1,2,...,512
+    n_layers: int = 16  # dilataciones 1,2,...,512
     residual_channels: int = 64
     dilation_channels: int = 64  # canales de filtro y compuerta
     skip_channels: int = 128
