@@ -42,6 +42,12 @@ def main() -> int:
         log.error(f'El archivo de checkpoint no es válido: {args.checkpoint}')
         return 1
 
+    if args.out.exists():
+        log.error(f'El archivo de salida es inválido: {args.out}')
+        return 2
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+
     cfg = core.Config()
     temperature = args.temperature if args.temperature is not None else cfg.temperature
 
@@ -72,7 +78,7 @@ def main() -> int:
 
     if not chunks:
         log.error('Nada que escribir')
-        return 2
+        return 3
 
     audio = np.concatenate(chunks)
     sf.write(str(args.out), audio, cfg.sample_rate)
