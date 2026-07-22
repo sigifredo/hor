@@ -11,27 +11,27 @@ import dataclasses
 @dataclasses.dataclass(frozen=True)
 class Config:
     # --- Representación de la señal ---
-    sample_rate: int = 16000  # mono
+    sample_rate: int = 16_000  # mono
     quant_levels: int = 256  # niveles mu-law (8 bits)
     mu: int = 255  # parámetro de compansión mu-law
 
     # --- Núcleo del modelo (definitivo) ---
-    n_layers: int = 16  # dilataciones 1,2,...,512
+    n_layers: int = 14  # dilataciones 1,2,...,512
     residual_channels: int = 64
     dilation_channels: int = 64  # canales de filtro y compuerta
     skip_channels: int = 128
     kernel_size: int = 2
 
     # --- Entrenamiento por ronda ---
-    chunk_len: int = 16000  # 1 s a 16 kHz
+    chunk_len: int = 16_000  # 1 s a 16 kHz
     lr: float = 1e-3
     queue_maxsize: int = 2  # contrapresión: pacing por throughput
 
     # --- Generación ---
     gen_block: int = 256  # muestras por relectura del puntero de pesos
     temperature: float = 1.0  # >1 dispersa, <1 concentra
-    out_capacity: int = 16000  # capacidad del ring de salida (LiveSink)
-    blocksize: int = 1024  # frames por callback de salida (LiveSink)
+    out_capacity: int = 16_000  # capacidad del ring de salida (LiveSink)
+    blocksize: int = 1_024  # frames por callback de salida (LiveSink)
 
     # --- Cómputo ---
     device: str = 'cpu'  # 'cpu' o 'cuda' (o 'cuda:0', etc.)
