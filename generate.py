@@ -3,8 +3,10 @@
 
 Carga los pesos (pretrain.py o los guardados por main.py durante el
 entrenamiento), genera la duración pedida con el generador incremental
-NumPy y escribe un WAV. No necesita GPU: la generación vive en CPU por
-diseño. Ctrl-C escribe el audio generado hasta el momento.
+torch y escribe un WAV. Ctrl-C escribe el audio generado hasta el momento.
+
+Con DMoL la salida del generador ya viene en [-1, 1] cuantizada a 16 bits;
+no hay que decodificar mu-law.
 
 Ejemplos:
   python generate.py --checkpoint ckpt.pt --duration 30 --out gen.wav
@@ -21,7 +23,6 @@ import time
 
 from core.checkpoint import load_checkpoint
 from core.model import WaveNet, WaveNetGenerator, cpu_state_dict
-from core.mu_law import mu_law_decode
 
 
 def build_args():
@@ -53,7 +54,7 @@ def main() -> int:
 
     model = WaveNet(cfg)  # CPU: la generación no usa GPU
     meta = load_checkpoint(args.checkpoint, model, cfg=cfg)
-    log.info(f'checkpoint {args.checkpoint} | pasos: {meta.get("steps", "?")} ' f'| loss: {meta.get("loss", "?")} | temperatura: {temperature}')
+    log.info(f'checkpoint {args.checkpoint} | pasos: {meta.get("steps", "?")} ' f'| loss: {meta.get("loss", "?"):.02f} | temperatura: {temperature}')
 
     generator = WaveNetGenerator(cfg)
     generator.load_state(cpu_state_dict(model), 0)
@@ -67,7 +68,9 @@ def main() -> int:
     try:
         while done < total:
             n = min(block, total - done)
-            chunks.append(mu_law_decode(generator.generate(n, temperature), cfg.mu))
+            # DMoL: el generador devuelve un tensor torch en [-1, 1] cuantizado
+            # a 16 bits; convertimos a numpy para acumular y escribir con soundfile.
+            chunks.append(generator.generate(n, temperature).detach().cpu().numpy())
             done += n
 
             if done % (5 * cfg.sample_rate) == 0 or done == total:
@@ -80,7 +83,7 @@ def main() -> int:
         log.error('Nada que escribir')
         return 3
 
-    audio = np.concatenate(chunks)
+    audio = np.concatenate(chunks).astype(np.float32, copy=False)
     sf.write(str(args.out), audio, cfg.sample_rate)
     log.info(f'Salida escrita en {args.out} ({len(audio) / cfg.sample_rate:.2f}s de audio)')
     log.info(f'Tiempo de generación: {time.perf_counter() - t0:.02f}s')
