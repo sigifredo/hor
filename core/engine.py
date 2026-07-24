@@ -17,15 +17,15 @@ nunca un estado a medias.
 Contrapresión: la cola de chunks es acotada (queue_maxsize). Con archivo, el
 pacing lo impone el throughput de entrenamiento, no el reloj de pared.'''
 
+from . import dmol
 from .checkpoint import load_checkpoint, save_checkpoint
 from .config import Config
 from .model import WaveNet, WaveNetGenerator, cpu_state_dict
-from .mu_law import mu_law_encode, mu_law_decode
 
+import numpy as np
 import queue
 import threading
 import torch
-import torch.nn.functional as F
 
 
 def _cuda_sync(device: str) -> None:
@@ -56,12 +56,13 @@ class SharedWeights:
 
 
 def accumulator_loop(source, chunk_queue, stop_event, cfg: Config):
+    '''Con DMoL la señal se pasa continua (float32 en [-1, 1]) al modelo; la
+    compansión mu-law ya no se aplica.'''
     while not stop_event.is_set():
-        chunk_f = source.read(cfg.chunk_len)
-        chunk_mu = mu_law_encode(chunk_f, cfg.mu)
+        chunk_f = source.read(cfg.chunk_len).astype(np.float32, copy=False)
         while not stop_event.is_set():
             try:
-                chunk_queue.put(chunk_mu, timeout=0.2)
+                chunk_queue.put(chunk_f, timeout=0.2)
                 break
             except queue.Full:
                 continue
@@ -69,17 +70,19 @@ def accumulator_loop(source, chunk_queue, stop_event, cfg: Config):
 
 def train_step(model, optimizer, x, cfg: Config):
     '''Un paso de Adam sobre una ventana (1, T). Devuelve la pérdida.
-    Compartido por training_loop, run_batched y pretrain.py.'''
-    logits = model(x)  # (1, Q, T)
+    Compartido por training_loop, run_batched y pretrain.py.
+
+    x: (1, T) float32 en [-1, 1]. El modelo predice params DMoL en la posición
+    t, que describen la distribución de la muestra t+1.'''
+    params = model(x)  # (1, 3K, T)
     w = cfg.loss_warmup
-    pred = logits[:, :, :-1][:, :, w:]  # predice t+1 desde t
+    pred = params[:, :, :-1][:, :, w:]  # predice t+1 desde t
     target = x[:, 1:][:, w:]
-    # F.cross_entropy acepta (B, C, T) con target (B, T) directamente.
-    # NUNCA reshape(-1, C) sobre (B, C, T): reinterpreta la memoria mezclando
-    # clases y tiempo, y produce un objetivo sin sentido que aun así "baja".
-    loss = F.cross_entropy(pred, target)
+    loss = dmol.dmol_loss(pred, target, cfg.n_mix)
     optimizer.zero_grad()
     loss.backward()
+    # Clipping mantenido: DMoL con log_s bajo puede producir gradientes muy
+    # grandes cuando el target cae en la cola de una componente estrecha.
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     optimizer.step()
     return loss
@@ -99,7 +102,7 @@ def training_loop(chunk_queue, train_model, optimizer, shared, stop_event, cfg: 
             continue
 
         dev = next(train_model.parameters()).device
-        x = torch.from_numpy(chunk).long().unsqueeze(0).to(dev)  # (1, T)
+        x = torch.from_numpy(chunk).float().unsqueeze(0).to(dev)  # (1, T) en [-1, 1]
         loss = train_step(train_model, optimizer, x, cfg)
 
         shared.set(cpu_state_dict(train_model))  # publicación versionada
@@ -122,7 +125,8 @@ def generation_loop(shared, generator, sink, stop_event, cfg: Config):
         if version != generator.version:
             generator.load_state(state, version)  # cachés persisten
         block = generator.generate(cfg.gen_block, cfg.temperature)
-        sink.write(mu_law_decode(block, cfg.mu))
+        # DMoL ya emite en [-1, 1] cuantizado a 16 bits; sink espera numpy.
+        sink.write(block.detach().cpu().numpy())
 
 
 class Engine:
@@ -209,14 +213,13 @@ def run_batched(cfg: Config, source, out_dir, step_seconds: float, iterations: i
         for i in range(iterations):
             # 1. Leer step_seconds del source (simula "escuchar durante X s").
             t0 = time.perf_counter()
-            chunk_f = source.read(n)
-            chunk_mu = mu_law_encode(chunk_f, cfg.mu)
+            chunk_f = source.read(n).astype(np.float32, copy=False)  # [-1, 1]
             t_read = time.perf_counter() - t0
 
             # 2. Entrenar: un paso de Adam por ventana de chunk_len.
             t0 = time.perf_counter()
             model.train()
-            x_all = torch.from_numpy(chunk_mu).long().to(cfg.device)
+            x_all = torch.from_numpy(chunk_f).float().to(cfg.device)
             losses = []
             for s in range(0, n, cfg.chunk_len):
                 xw = x_all[s : s + cfg.chunk_len].unsqueeze(0)
@@ -227,12 +230,12 @@ def run_batched(cfg: Config, source, out_dir, step_seconds: float, iterations: i
             _cuda_sync(cfg.device)
             t_train = time.perf_counter() - t0
 
-            # 3. Publicar pesos al generador y generar step_seconds (CPU/NumPy).
+            # 3. Publicar pesos al generador y generar step_seconds.
             t0 = time.perf_counter()
             model.eval()
             generator.load_state(cpu_state_dict(model))
             block = generator.generate(n, cfg.temperature)
-            audio_out = mu_law_decode(block, cfg.mu)
+            audio_out = block.detach().cpu().numpy()
             t_gen = time.perf_counter() - t0
 
             # 4. Guardar.

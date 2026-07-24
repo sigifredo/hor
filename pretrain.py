@@ -27,7 +27,6 @@ import tqdm
 from core.checkpoint import load_checkpoint, save_checkpoint
 from core.engine import train_step
 from core.model import WaveNet
-from core.mu_law import mu_law_encode
 
 
 def build_args():
@@ -95,8 +94,8 @@ def main() -> int:
         bar = tqdm.tqdm(range(step0 + 1, step0 + steps + 1), desc='preentrenamiento', unit='paso')
 
         for step in bar:
-            chunk_mu = mu_law_encode(source.read(cfg.chunk_len), cfg.mu)
-            x = torch.from_numpy(chunk_mu).long().unsqueeze(0).to(cfg.device)
+            chunk_f = source.read(cfg.chunk_len).astype('float32', copy=False)
+            x = torch.from_numpy(chunk_f).float().unsqueeze(0).to(cfg.device)
             # .item() sincroniza CUDA: la pérdida es real y el ritmo medido, honesto.
             loss_val = float(train_step(model, optimizer, x, cfg).item())
 
