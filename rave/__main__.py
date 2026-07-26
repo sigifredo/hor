@@ -9,8 +9,11 @@ Uso:
 '''
 
 from __future__ import annotations
+from . import engine
 
 import argparse
+import praxis.log as log
+import time
 import torch
 
 
@@ -46,10 +49,10 @@ def _add_train_args(sp: argparse.ArgumentParser) -> None:
 
 
 def _run_train(args: argparse.Namespace) -> None:
-    from .engine import TrainConfig, train
-
-    config = TrainConfig(audio_paths=list(args.audio), out_dir=args.out_dir, sample_rate=args.sample_rate, segment_length=args.segment_length, hop_length=args.hop_length, val_fraction=args.val_fraction, batch_size=args.batch_size, num_workers=args.num_workers, n_bands=args.n_bands, pqmf_taps=args.pqmf_taps, hidden_channels=args.hidden_channels, strides=tuple(args.strides), latent_dim=args.latent_dim, n_res_per_block=args.n_res_per_block, fft_sizes=tuple(args.fft_sizes), beta_max=args.beta_max, warmup_steps=args.warmup_steps, stft_weight=args.stft_weight, waveform_weight=args.waveform_weight, lr=args.lr, grad_clip=args.grad_clip, n_steps=args.n_steps, log_every=args.log_every, val_every=args.val_every, ckpt_every=args.ckpt_every, keep_last_ckpts=args.keep_last_ckpts, seed=args.seed, device=args.device)
-    train(config)
+    start_time = time.perf_counter()
+    config = engine.TrainConfig(audio_paths=list(args.audio), out_dir=args.out_dir, sample_rate=args.sample_rate, segment_length=args.segment_length, hop_length=args.hop_length, val_fraction=args.val_fraction, batch_size=args.batch_size, num_workers=args.num_workers, n_bands=args.n_bands, pqmf_taps=args.pqmf_taps, hidden_channels=args.hidden_channels, strides=tuple(args.strides), latent_dim=args.latent_dim, n_res_per_block=args.n_res_per_block, fft_sizes=tuple(args.fft_sizes), beta_max=args.beta_max, warmup_steps=args.warmup_steps, stft_weight=args.stft_weight, waveform_weight=args.waveform_weight, lr=args.lr, grad_clip=args.grad_clip, n_steps=args.n_steps, log_every=args.log_every, val_every=args.val_every, ckpt_every=args.ckpt_every, keep_last_ckpts=args.keep_last_ckpts, seed=args.seed, device=args.device)
+    engine.train(config)
+    log.info(f'Duración del entrenamiento: {time.perf_counter() - start_time:.4f} segundos')
 
 
 def _run_reconstruct(args: argparse.Namespace) -> None:
