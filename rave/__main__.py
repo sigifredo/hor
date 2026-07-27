@@ -60,6 +60,30 @@ def _add_train_args(sp: argparse.ArgumentParser) -> None:
     sp.add_argument('--device', default='auto', choices=['auto', 'cpu', 'cuda'], help='dispositivo de cómputo')
 
 
+def _run_info(args: argparse.Namespace) -> None:
+    generate.print_checkpoint_info(generate.describe_checkpoint(args.checkpoint))
+
+
+def _run_reconstruct(args: argparse.Namespace) -> None:
+    device = torch.device(args.device if args.device != 'auto' else ('cuda' if torch.cuda.is_available() else 'cpu'))
+    model, config = generate.load_model(args.checkpoint, device)
+    generate.reconstruct(
+        model,
+        args.audio,
+        args.output,
+        sample_rate=config['sample_rate'],
+        device=device,
+    )
+
+
+def _run_sample(args: argparse.Namespace) -> None:
+    start_time = time.perf_counter()
+    device = torch.device(args.device if args.device != 'auto' else ('cuda' if torch.cuda.is_available() else 'cpu'))
+    model, config = generate.load_model(args.checkpoint, device)
+    generate.sample_prior(model, args.output, duration_seconds=args.duration, sample_rate=config['sample_rate'], device=device, seed=args.seed)
+    log.info(f'Duración de generación: {praxis.time.seconds_to_hms(time.perf_counter() - start_time)}')
+
+
 def _run_train(args: argparse.Namespace) -> None:
     start_time = time.perf_counter()
     config = engine.TrainConfig(
@@ -96,26 +120,6 @@ def _run_train(args: argparse.Namespace) -> None:
     log.info(f'Duración del entrenamiento: {praxis.time.seconds_to_hms(time.perf_counter() - start_time)}')
 
 
-def _run_reconstruct(args: argparse.Namespace) -> None:
-    device = torch.device(args.device if args.device != 'auto' else ('cuda' if torch.cuda.is_available() else 'cpu'))
-    model, config = generate.load_model(args.checkpoint, device)
-    generate.reconstruct(
-        model,
-        args.audio,
-        args.output,
-        sample_rate=config['sample_rate'],
-        device=device,
-    )
-
-
-def _run_sample(args: argparse.Namespace) -> None:
-    start_time = time.perf_counter()
-    device = torch.device(args.device if args.device != 'auto' else ('cuda' if torch.cuda.is_available() else 'cpu'))
-    model, config = generate.load_model(args.checkpoint, device)
-    generate.sample_prior(model, args.output, duration_seconds=args.duration, sample_rate=config['sample_rate'], device=device, seed=args.seed)
-    log.info(f'Duración de generación: {praxis.time.seconds_to_hms(time.perf_counter() - start_time)}')
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog='rave')
     sub = parser.add_subparsers(dest='command', required=True)
@@ -136,6 +140,9 @@ def build_parser() -> argparse.ArgumentParser:
     sam_p.add_argument('--seed', type=int, default=None, help='semilla para reproducibilidad; sin ella cada ' 'corrida genera algo distinto')
     sam_p.add_argument('--device', default='auto', choices=['auto', 'cpu', 'cuda'], help='dispositivo de cómputo')
 
+    info_p = sub.add_parser('info', help='Inspeccionar metadatos de un checkpoint')
+    info_p.add_argument('--checkpoint', type=pathlib.Path, required=True, help='Ruta al archivo .pt del checkpoint a inspeccionar')
+
     return parser
 
 
@@ -149,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
         _run_reconstruct(args)
     elif args.command == 'sample':
         _run_sample(args)
+    elif args.command == 'info':
+        _run_info(args)
     else:
         parser.print_help()
         return 1
