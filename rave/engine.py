@@ -16,23 +16,21 @@ Diseño:
 '''
 
 from __future__ import annotations
-
 from .data import AudioSegmentDataset, split_train_val
-from dataclasses import dataclass, field
 from .losses import RAVELoss
 from .model import RAVE
-from pathlib import Path
-from torch.utils.data import DataLoader
 
 import csv
+import dataclasses
+import pathlib
 import praxis.log as log
 import time
 import torch
 
 
-@dataclass
+@dataclasses.dataclass
 class TrainConfig:
-    audio_paths: list[str] = field(default_factory=list)
+    audio_paths: list[str] = dataclasses.field(default_factory=list)
     out_dir: str = 'runs/rave'
     sample_rate: int = 16_000
     segment_length: int = 32_768
@@ -72,7 +70,7 @@ class TrainConfig:
     device: str = 'auto'
 
 
-def _infinite(loader: DataLoader):
+def _infinite(loader: torch.utils.data.DataLoader):
     while True:
         for batch in loader:
             yield batch
@@ -84,7 +82,13 @@ def _select_device(name: str) -> torch.device:
     return torch.device(name)
 
 
-def _save_checkpoint(path: Path, model: RAVE, optimizer: torch.optim.Optimizer, step: int, config: TrainConfig) -> None:
+def _save_checkpoint(
+    path: pathlib.Path,
+    model: RAVE,
+    optimizer: torch.optim.Optimizer,
+    step: int,
+    config: TrainConfig,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
@@ -97,14 +101,24 @@ def _save_checkpoint(path: Path, model: RAVE, optimizer: torch.optim.Optimizer, 
     )
 
 
-def _prune_old_checkpoints(ckpt_dir: Path, pattern: str, keep_last: int) -> None:
+def _prune_old_checkpoints(
+    ckpt_dir: pathlib.Path,
+    pattern: str,
+    keep_last: int,
+) -> None:
     ckpts = sorted(ckpt_dir.glob(pattern))
     for old in ckpts[:-keep_last]:
         old.unlink()
 
 
 @torch.no_grad()
-def _validate(model: RAVE, loss_fn: RAVELoss, loader: DataLoader, step: int, device: torch.device) -> dict[str, float]:
+def _validate(
+    model: RAVE,
+    loss_fn: RAVELoss,
+    loader: torch.utils.data.DataLoader,
+    step: int,
+    device: torch.device,
+) -> dict[str, float]:
     model.eval()
     sums: dict[str, float] = {}
     n_batches = 0
@@ -119,11 +133,11 @@ def _validate(model: RAVE, loss_fn: RAVELoss, loader: DataLoader, step: int, dev
     return {k: v / n_batches for k, v in sums.items()}
 
 
-def train(config: TrainConfig) -> Path:
+def train(config: TrainConfig) -> pathlib.Path:
     '''Ejecuta el entrenamiento. Devuelve el path del checkpoint final.'''
     torch.manual_seed(config.seed)
     device = _select_device(config.device)
-    out_dir = Path(config.out_dir)
+    out_dir = pathlib.Path(config.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir = out_dir / 'checkpoints'
     ckpt_dir.mkdir(exist_ok=True)
@@ -131,8 +145,8 @@ def train(config: TrainConfig) -> Path:
     dataset = AudioSegmentDataset(audio_paths=config.audio_paths, segment_length=config.segment_length, hop_length=config.hop_length, sample_rate=config.sample_rate, normalize=True)
     train_set, val_set = split_train_val(dataset, val_fraction=config.val_fraction, seed=config.seed)
 
-    train_loader = DataLoader(train_set, batch_size=config.batch_size, shuffle=True, num_workers=config.num_workers, drop_last=True, pin_memory=True)
-    val_loader = DataLoader(val_set, batch_size=config.batch_size, shuffle=False, num_workers=config.num_workers, drop_last=False)
+    train_loader = torch.utils.data.DataLoader(train_set, batch_size=config.batch_size, shuffle=True, num_workers=config.num_workers, drop_last=True, pin_memory=True)
+    val_loader = torch.utils.data.DataLoader(val_set, batch_size=config.batch_size, shuffle=False, num_workers=config.num_workers, drop_last=False)
 
     model = RAVE(n_bands=config.n_bands, pqmf_taps=config.pqmf_taps, hidden_channels=config.hidden_channels, strides=config.strides, latent_dim=config.latent_dim, n_res_per_block=config.n_res_per_block).to(device)
     if config.segment_length % model.total_stride != 0:
