@@ -92,16 +92,22 @@ def sample_prior(model: RAVE, output_path: str | pathlib.Path, duration_seconds:
     sample_rate. Con corpus pequeño y beta bajo el resultado suele ser
     perceptualmente pobre; se documenta pero se ofrece.
     '''
+
     device = device or next(model.parameters()).device
+
     if seed is not None:
         torch.manual_seed(seed)
+
     target_samples = int(duration_seconds * sample_rate)
     target_samples -= target_samples % model.total_stride
+
     if target_samples <= 0:
         raise ValueError(f'duration_seconds={duration_seconds} demasiado corta para ' f'total_stride={model.total_stride} a {sample_rate} Hz')
+
     L_z = target_samples // model.total_stride
     audio = model.sample_prior(batch_size=1, length=L_z, device=device)
     peak = audio.abs().max().clamp(min=1e-6)
     audio = audio / peak
+
     _save_audio(output_path, audio, sample_rate)
-    log.info(f'muestra del prior guardada en {output_path}  ' f'(duración: {target_samples / sample_rate:.3f}s)')
+    log.info(f'Muestra del prior guardada en {output_path}  ' f'(Duración: {target_samples / sample_rate:.2f}s)')
