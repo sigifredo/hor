@@ -151,12 +151,6 @@ def _save_checkpoint(
     )
 
 
-def _select_device(name: str) -> torch.device:
-    if name == 'auto':
-        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    return torch.device(name)
-
-
 @torch.no_grad()
 def _validate(
     model: RAVE,
@@ -168,15 +162,29 @@ def _validate(
     model.eval()
     sums: dict[str, float] = {}
     n_batches = 0
+
     for batch in loader:
         batch = batch.to(device)
         x_hat, mu, log_sigma = model(batch)
         losses = loss_fn(batch, x_hat, mu, log_sigma, step)
+
         for k, v in losses.items():
             sums[k] = sums.get(k, 0.0) + float(v.item())
+
         n_batches += 1
+
     model.train()
     return {k: v / n_batches for k, v in sums.items()}
+
+
+def select_device(name: str | torch.device | None) -> torch.device:
+    if isinstance(name, torch.device):
+        return name
+
+    if name is None or name == 'auto':
+        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    return torch.device(name)
 
 
 def train(config: TrainConfig) -> pathlib.Path:
@@ -190,22 +198,58 @@ def train(config: TrainConfig) -> pathlib.Path:
     '''
 
     torch.manual_seed(config.seed)
-    device = _select_device(config.device)
+    device = select_device(config.device)
     config.out_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir = config.out_dir / 'checkpoints'
     ckpt_dir.mkdir(exist_ok=True)
 
-    dataset = AudioSegmentDataset(audio_paths=config.audio_paths, segment_length=config.segment_length, hop_length=config.hop_length, sample_rate=config.sample_rate, normalize=True)
-    train_set, val_set = split_train_val(dataset, val_fraction=config.val_fraction, seed=config.seed)
+    dataset = AudioSegmentDataset(
+        audio_paths=config.audio_paths,
+        segment_length=config.segment_length,
+        hop_length=config.hop_length,
+        sample_rate=config.sample_rate,
+        normalize=True,
+    )
+    train_set, val_set = split_train_val(
+        dataset,
+        val_fraction=config.val_fraction,
+        seed=config.seed,
+    )
 
-    train_loader = torch.utils.data.DataLoader(train_set, batch_size=config.batch_size, shuffle=True, num_workers=config.num_workers, drop_last=True, pin_memory=True)
-    val_loader = torch.utils.data.DataLoader(val_set, batch_size=config.batch_size, shuffle=False, num_workers=config.num_workers, drop_last=False)
+    train_loader = torch.utils.data.DataLoader(
+        train_set,
+        batch_size=config.batch_size,
+        shuffle=True,
+        num_workers=config.num_workers,
+        drop_last=True,
+        pin_memory=True,
+    )
+    val_loader = torch.utils.data.DataLoader(
+        val_set,
+        batch_size=config.batch_size,
+        shuffle=False,
+        num_workers=config.num_workers,
+        drop_last=False,
+    )
 
-    model = RAVE(n_bands=config.n_bands, pqmf_taps=config.pqmf_taps, hidden_channels=config.hidden_channels, strides=config.strides, latent_dim=config.latent_dim, n_res_per_block=config.n_res_per_block).to(device)
+    model = RAVE(
+        n_bands=config.n_bands,
+        pqmf_taps=config.pqmf_taps,
+        hidden_channels=config.hidden_channels,
+        strides=config.strides,
+        latent_dim=config.latent_dim,
+        n_res_per_block=config.n_res_per_block,
+    ).to(device)
     if config.segment_length % model.total_stride != 0:
         raise ValueError(f'segment_length={config.segment_length} no es múltiplo de ' f'total_stride={model.total_stride}')
 
-    loss_fn = RAVELoss(fft_sizes=config.fft_sizes, beta_max=config.beta_max, warmup_steps=config.warmup_steps, stft_weight=config.stft_weight, waveform_weight=config.waveform_weight).to(device)
+    loss_fn = RAVELoss(
+        fft_sizes=config.fft_sizes,
+        beta_max=config.beta_max,
+        warmup_steps=config.warmup_steps,
+        stft_weight=config.stft_weight,
+        waveform_weight=config.waveform_weight,
+    ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config.lr, betas=config.adam_betas)
 
