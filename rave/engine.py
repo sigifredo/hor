@@ -13,6 +13,8 @@ Diseño:
       stdout cada log_every pasos.
     * Validación sobre subset separado del mismo material: útil como señal
       de estabilidad, no como test de generalización real.
+    * Reanudación desde checkpoint en dos modos: continue (retomar estado
+      completo) y finetune (cargar solo pesos del modelo).
 '''
 
 from __future__ import annotations
@@ -67,6 +69,10 @@ class TrainConfig:
     keep_last_ckpts: int = 3
     seed: int = 42
 
+    # reanudar/finetune
+    resume_from: pathlib.Path | None = None
+    resume_mode: str = 'continue'
+
     device: str = 'auto'
 
 
@@ -76,10 +82,54 @@ def _infinite(loader: torch.utils.data.DataLoader):
             yield batch
 
 
-def _select_device(name: str) -> torch.device:
-    if name == 'auto':
-        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    return torch.device(name)
+def _load_resume(
+    path: pathlib.Path,
+    model: RAVE,
+    optimizer: torch.optim.Optimizer,
+    mode: str,
+) -> int:
+    '''Restaura estado del modelo y opcionalmente del optimizador.
+
+    Args:
+        path: ruta al checkpoint a cargar.
+        model: modelo destino, debe tener la misma arquitectura que la usada
+            al guardar el checkpoint.
+        optimizer: optimizador destino.
+        mode: 'continue' restaura pesos, optimizer y step del checkpoint;
+            'finetune' restaura solo los pesos, optimizer y step arrancan
+            desde cero.
+
+    Returns:
+        Step inicial. Cero en modo finetune, step guardado en modo continue.
+
+    Raises:
+        ValueError: si mode no es 'continue' ni 'finetune'.
+    '''
+
+    if mode not in ('continue', 'finetune'):
+        raise ValueError(f'resume_mode inválido: {mode}')
+
+    ckpt = torch.load(path, map_location='cpu', weights_only=False)
+    model.load_state_dict(ckpt['model'])
+
+    if mode == 'continue':
+        optimizer.load_state_dict(ckpt['optimizer'])
+        start_step = int(ckpt.get('step', 0))
+        log.info(f'reanudando desde step {start_step:,} (optimizer restaurado)')
+        return start_step
+
+    log.info('fine-tuning desde pesos del checkpoint (optimizer y step desde cero)')
+    return 0
+
+
+def _prune_old_checkpoints(
+    ckpt_dir: pathlib.Path,
+    pattern: str,
+    keep_last: int,
+) -> None:
+    ckpts = sorted(ckpt_dir.glob(pattern))
+    for old in ckpts[:-keep_last]:
+        old.unlink()
 
 
 def _save_checkpoint(
@@ -101,14 +151,10 @@ def _save_checkpoint(
     )
 
 
-def _prune_old_checkpoints(
-    ckpt_dir: pathlib.Path,
-    pattern: str,
-    keep_last: int,
-) -> None:
-    ckpts = sorted(ckpt_dir.glob(pattern))
-    for old in ckpts[:-keep_last]:
-        old.unlink()
+def _select_device(name: str) -> torch.device:
+    if name == 'auto':
+        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    return torch.device(name)
 
 
 @torch.no_grad()
@@ -134,7 +180,15 @@ def _validate(
 
 
 def train(config: TrainConfig) -> pathlib.Path:
-    '''Ejecuta el entrenamiento. Devuelve el path del checkpoint final.'''
+    '''Ejecuta el entrenamiento.
+
+    Args:
+        config: hiperparámetros del entrenamiento.
+
+    Returns:
+        Path del checkpoint final guardado.
+    '''
+
     torch.manual_seed(config.seed)
     device = _select_device(config.device)
     config.out_dir.mkdir(parents=True, exist_ok=True)
@@ -154,6 +208,10 @@ def train(config: TrainConfig) -> pathlib.Path:
     loss_fn = RAVELoss(fft_sizes=config.fft_sizes, beta_max=config.beta_max, warmup_steps=config.warmup_steps, stft_weight=config.stft_weight, waveform_weight=config.waveform_weight).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config.lr, betas=config.adam_betas)
+
+    start_step = 0
+    if config.resume_from is not None:
+        start_step = _load_resume(config.resume_from, model, optimizer, config.resume_mode)
 
     train_iter = _infinite(train_loader)
     log_path = config.out_dir / 'train_log.csv'
@@ -179,7 +237,7 @@ def train(config: TrainConfig) -> pathlib.Path:
     start_time = time.time()
     running: dict[str, float] = {}
 
-    for step in range(1, config.n_steps + 1):
+    for step in range(start_step + 1, start_step + config.n_steps + 1):
         batch = next(train_iter).to(device, non_blocking=True)
         x_hat, mu, log_sigma = model(batch)
         losses = loss_fn(batch, x_hat, mu, log_sigma, step)
@@ -213,8 +271,9 @@ def train(config: TrainConfig) -> pathlib.Path:
             _prune_old_checkpoints(ckpt_dir, 'rave_step*.pt', config.keep_last_ckpts)
             log.info(f'  checkpoint guardado: {ckpt_path.name}')
 
+    final_step = start_step + config.n_steps
     final_path = ckpt_dir / 'rave_final.pt'
-    _save_checkpoint(final_path, model, optimizer, config.n_steps, config)
+    _save_checkpoint(final_path, model, optimizer, final_step, config)
     log.info(f'entrenamiento completo. checkpoint final: {final_path}')
 
     return final_path
