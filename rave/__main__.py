@@ -18,7 +18,6 @@ import pathlib
 import praxis
 import praxis.log as log
 import time
-import torch
 
 
 def _add_train_args(sp: argparse.ArgumentParser) -> None:
