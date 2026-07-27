@@ -71,17 +71,23 @@ class AudioSegmentDataset(Dataset):
 
         self.audios: list[torch.Tensor] = []
         self.paths: list[Path] = []
+
         for p in audio_paths:
             path = Path(p)
             waveform, sr = _load_audio_file(path)
+
             if waveform.size(0) > 1:
                 waveform = waveform.mean(dim=0, keepdim=True)
+
             if sr != sample_rate:
                 waveform = _resample(waveform, sr, sample_rate)
+
             waveform = waveform.squeeze(0)
+
             if normalize:
                 peak = waveform.abs().max().clamp(min=1e-6)
                 waveform = waveform / peak
+
             self.audios.append(waveform.contiguous())
             self.paths.append(path)
 
@@ -89,7 +95,9 @@ class AudioSegmentDataset(Dataset):
         for idx, audio in enumerate(self.audios):
             if audio.numel() < self.segment_length:
                 continue
+
             n_starts = 1 + (audio.numel() - self.segment_length) // self.hop_length
+
             for i in range(n_starts):
                 start = i * self.hop_length
                 self.segments.append((idx, start))
@@ -108,6 +116,7 @@ class AudioSegmentDataset(Dataset):
 
 def split_train_val(dataset: AudioSegmentDataset, val_fraction: float = 0.1, seed: int = 42) -> tuple[torch.utils.data.Subset, torch.utils.data.Subset]:
     '''Split train/val determinista sobre índices de segmento.'''
+
     n = len(dataset)
     indices = list(range(n))
     rng = random.Random(seed)
@@ -117,4 +126,5 @@ def split_train_val(dataset: AudioSegmentDataset, val_fraction: float = 0.1, see
     train_idx = indices[n_val:]
     train_set = torch.utils.data.Subset(dataset, train_idx)
     val_set = torch.utils.data.Subset(dataset, val_idx)
+
     return train_set, val_set

@@ -2,7 +2,7 @@
 
 Uso:
     python -m rave train --audio archivo.wav --out-dir runs/rave_v1
-    python -m rave reconstruct --checkpoint runs/rave_v1/checkpoints/rave_final.pt \\
+    python -m rave generate --checkpoint runs/rave_v1/checkpoints/rave_final.pt \\
         --audio entrada.wav --output reconstruido.wav
     python -m rave sample --checkpoint runs/rave_v1/checkpoints/rave_final.pt \\
         --duration 4.0 --output muestra_prior.wav
@@ -10,8 +10,10 @@ Uso:
 
 from __future__ import annotations
 from . import engine
+from . import generate
 
 import argparse
+import pathlib
 import praxis
 import praxis.log as log
 import time
@@ -20,7 +22,7 @@ import torch
 
 def _add_train_args(sp: argparse.ArgumentParser) -> None:
     sp.add_argument('--audio', nargs='+', required=True, help='uno o más archivos de audio para entrenamiento')
-    sp.add_argument('--out-dir', required=True)
+    sp.add_argument('--out-dir', type=pathlib.Path, required=True)
     sp.add_argument('--sample-rate', type=int, default=16_000)
     sp.add_argument('--segment-length', type=int, default=32_768)
     sp.add_argument('--hop-length', type=int, default=None)
@@ -85,12 +87,18 @@ def _run_train(args: argparse.Namespace) -> None:
     log.info(f'Duración del entrenamiento: {praxis.time.seconds_to_hms(time.perf_counter() - start_time)}')
 
 
-def _run_reconstruct(args: argparse.Namespace) -> None:
-    from .generate import load_model, reconstruct
+def _run_generate(args: argparse.Namespace) -> None:
+    # from .generate import load_model, reconstruct
 
     device = torch.device(args.device if args.device != 'auto' else ('cuda' if torch.cuda.is_available() else 'cpu'))
-    model, config = load_model(args.checkpoint, device)
-    reconstruct(model, args.audio, args.output, sample_rate=config['sample_rate'], device=device)
+    model, config = generate.load_model(args.checkpoint, device)
+    generate.reconstruct(
+        model,
+        args.audio,
+        args.output,
+        sample_rate=config['sample_rate'],
+        device=device,
+    )
 
 
 def _run_sample(args: argparse.Namespace) -> None:
@@ -108,10 +116,10 @@ def build_parser() -> argparse.ArgumentParser:
     train_p = sub.add_parser('train', help='entrenar el VAE tipo RAVE')
     _add_train_args(train_p)
 
-    rec_p = sub.add_parser('reconstruct', help='reconstruir un archivo')
-    rec_p.add_argument('--checkpoint', required=True)
-    rec_p.add_argument('--audio', required=True)
-    rec_p.add_argument('--output', required=True)
+    rec_p = sub.add_parser('generate', help='reconstruir un archivo')
+    rec_p.add_argument('--checkpoint', type=pathlib.Path, required=True)
+    rec_p.add_argument('--audio', type=pathlib.Path, required=True)
+    rec_p.add_argument('--output', type=pathlib.Path, required=True)
     rec_p.add_argument('--device', default='auto', choices=['auto', 'cpu', 'cuda'])
 
     sam_p = sub.add_parser('sample', help='muestrear desde el prior')
@@ -129,8 +137,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == 'train':
         _run_train(args)
-    elif args.command == 'reconstruct':
-        _run_reconstruct(args)
+    elif args.command == 'generate':
+        _run_generate(args)
     elif args.command == 'sample':
         _run_sample(args)
     else:

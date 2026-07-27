@@ -18,15 +18,15 @@ Convenciones:
 from __future__ import annotations
 
 from .model import RAVE
-from pathlib import Path
 
+import pathlib
 import praxis.log as log
 import soundfile as sf
 import torch
 import torch.nn.functional as F
 
 
-def load_model(checkpoint_path: str | Path, device: torch.device | None = None) -> tuple[RAVE, dict]:
+def load_model(checkpoint_path: pathlib.Path, device: torch.device | None = None) -> tuple[RAVE, dict]:
     '''Carga un checkpoint y reconstruye el modelo con su configuración.'''
     device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     ckpt = torch.load(str(checkpoint_path), map_location=device, weights_only=False)
@@ -37,7 +37,7 @@ def load_model(checkpoint_path: str | Path, device: torch.device | None = None) 
     return model, config
 
 
-def _load_audio(path: str | Path, target_sr: int) -> torch.Tensor:
+def _load_audio(path: str | pathlib.Path, target_sr: int) -> torch.Tensor:
     data, sr = sf.read(str(path), dtype='float32', always_2d=True)
     waveform = torch.from_numpy(data.T).contiguous()
     if waveform.size(0) > 1:
@@ -49,17 +49,25 @@ def _load_audio(path: str | Path, target_sr: int) -> torch.Tensor:
     return waveform / peak
 
 
-def _save_audio(path: str | Path, waveform: torch.Tensor, sample_rate: int) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
+def _save_audio(path: pathlib.Path, waveform: torch.Tensor, sample_rate: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
     if waveform.dim() == 3:
         waveform = waveform.squeeze(0)
     if waveform.dim() == 2:
         waveform = waveform.squeeze(0)
+
     sf.write(str(path), waveform.cpu().numpy(), sample_rate)
 
 
 @torch.no_grad()
-def reconstruct(model: RAVE, input_path: str | Path, output_path: str | Path, sample_rate: int = 16_000, device: torch.device | None = None) -> None:
+def reconstruct(
+    model: RAVE,
+    input_path: pathlib.Path,
+    output_path: pathlib.Path,
+    sample_rate: int = 16_000,
+    device: torch.device | None = None,
+) -> None:
     '''Carga un archivo, reconstruye y guarda.'''
     device = device or next(model.parameters()).device
     audio = _load_audio(input_path, sample_rate).to(device)
@@ -77,7 +85,7 @@ def reconstruct(model: RAVE, input_path: str | Path, output_path: str | Path, sa
 
 
 @torch.no_grad()
-def sample_prior(model: RAVE, output_path: str | Path, duration_seconds: float, sample_rate: int = 16_000, device: torch.device | None = None, seed: int | None = None) -> None:
+def sample_prior(model: RAVE, output_path: str | pathlib.Path, duration_seconds: float, sample_rate: int = 16_000, device: torch.device | None = None, seed: int | None = None) -> None:
     '''Muestrea z ~ N(0, I) y decodifica.
 
     La duración se ajusta al múltiplo más cercano de total_stride /

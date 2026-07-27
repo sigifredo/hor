@@ -31,7 +31,7 @@ import torch
 @dataclasses.dataclass
 class TrainConfig:
     audio_paths: list[str] = dataclasses.field(default_factory=list)
-    out_dir: str = 'runs/rave'
+    out_dir: pathlib.Path = pathlib.Path('runs/rave')
     sample_rate: int = 16_000
     segment_length: int = 32_768
     hop_length: int | None = None
@@ -137,9 +137,8 @@ def train(config: TrainConfig) -> pathlib.Path:
     '''Ejecuta el entrenamiento. Devuelve el path del checkpoint final.'''
     torch.manual_seed(config.seed)
     device = _select_device(config.device)
-    out_dir = pathlib.Path(config.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_dir = out_dir / 'checkpoints'
+    config.out_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_dir = config.out_dir / 'checkpoints'
     ckpt_dir.mkdir(exist_ok=True)
 
     dataset = AudioSegmentDataset(audio_paths=config.audio_paths, segment_length=config.segment_length, hop_length=config.hop_length, sample_rate=config.sample_rate, normalize=True)
@@ -157,13 +156,15 @@ def train(config: TrainConfig) -> pathlib.Path:
     optimizer = torch.optim.Adam(model.parameters(), lr=config.lr, betas=config.adam_betas)
 
     train_iter = _infinite(train_loader)
-    log_path = out_dir / 'train_log.csv'
-    val_path = out_dir / 'val_log.csv'
+    log_path = config.out_dir / 'train_log.csv'
+    val_path = config.out_dir / 'val_log.csv'
     log_fields = ['step', 'total', 'stft_sc', 'stft_log_mag', 'waveform_l1', 'kl', 'beta', 'elapsed_s']
     val_fields = ['step'] + [f'val_{k}' for k in ('total', 'stft_sc', 'stft_log_mag', 'waveform_l1', 'kl')]
+
     if not log_path.exists():
         with log_path.open('w', newline='') as f:
             csv.writer(f).writerow(log_fields)
+
     if not val_path.exists():
         with val_path.open('w', newline='') as f:
             csv.writer(f).writerow(val_fields)
@@ -194,6 +195,7 @@ def train(config: TrainConfig) -> pathlib.Path:
             elapsed = time.time() - start_time
             avg = {k: v / config.log_every for k, v in running.items()}
             log.info(f'step {step:>7d}  total={avg["total"]:.4f}  ' f'sc={avg["stft_sc"]:.4f}  ' f'lmag={avg["stft_log_mag"]:.4f}  ' f'l1={avg["waveform_l1"]:.4f}  ' f'kl={avg["kl"]:.4f}  ' f'β={avg["beta"]:.4f}  ' f'[{elapsed:.1f}s]')
+
             with log_path.open('a', newline='') as f:
                 csv.writer(f).writerow([step, avg['total'], avg['stft_sc'], avg['stft_log_mag'], avg['waveform_l1'], avg['kl'], avg['beta'], elapsed])
             running = {}
@@ -201,6 +203,7 @@ def train(config: TrainConfig) -> pathlib.Path:
         if step % config.val_every == 0 and len(val_set) > 0:
             val = _validate(model, loss_fn, val_loader, step, device)
             log.info(f'  [val] total={val["total"]:.4f}  ' f'sc={val["stft_sc"]:.4f}  ' f'lmag={val["stft_log_mag"]:.4f}  ' f'kl={val["kl"]:.4f}')
+
             with val_path.open('a', newline='') as f:
                 csv.writer(f).writerow([step, val['total'], val['stft_sc'], val['stft_log_mag'], val['waveform_l1'], val['kl']])
 
@@ -213,4 +216,5 @@ def train(config: TrainConfig) -> pathlib.Path:
     final_path = ckpt_dir / 'rave_final.pt'
     _save_checkpoint(final_path, model, optimizer, config.n_steps, config)
     log.info(f'entrenamiento completo. checkpoint final: {final_path}')
+
     return final_path
