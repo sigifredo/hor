@@ -84,7 +84,7 @@ def _run_reconstruct(args: argparse.Namespace) -> None:
 
 def _run_sample(args: argparse.Namespace) -> None:
     start_time = time.perf_counter()
-    device = engine.select_device()
+    device = engine.select_device(args.device)
     model, config = generate.load_model(args.checkpoint, device)
     generate.sample_prior(
         model,
