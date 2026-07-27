@@ -65,6 +65,7 @@ def _run_info(args: argparse.Namespace) -> None:
 
 
 def _run_reconstruct(args: argparse.Namespace) -> None:
+    start_time = time.perf_counter()
     device = torch.device(args.device if args.device != 'auto' else ('cuda' if torch.cuda.is_available() else 'cpu'))
     model, config = generate.load_model(args.checkpoint, device)
     generate.reconstruct(
@@ -74,13 +75,21 @@ def _run_reconstruct(args: argparse.Namespace) -> None:
         sample_rate=config['sample_rate'],
         device=device,
     )
+    log.info(f'Duración de generación: {praxis.time.seconds_to_hms(time.perf_counter() - start_time)}')
 
 
 def _run_sample(args: argparse.Namespace) -> None:
     start_time = time.perf_counter()
     device = torch.device(args.device if args.device != 'auto' else ('cuda' if torch.cuda.is_available() else 'cpu'))
     model, config = generate.load_model(args.checkpoint, device)
-    generate.sample_prior(model, args.output, duration_seconds=args.duration, sample_rate=config['sample_rate'], device=device, seed=args.seed)
+    generate.sample_prior(
+        model,
+        args.output,
+        duration_seconds=args.duration,
+        sample_rate=config['sample_rate'],
+        device=device,
+        seed=args.seed,
+    )
     log.info(f'Duración de generación: {praxis.time.seconds_to_hms(time.perf_counter() - start_time)}')
 
 
