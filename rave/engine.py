@@ -25,6 +25,7 @@ from .model import RAVE
 import csv
 import dataclasses
 import pathlib
+import praxis
 import praxis.log as log
 import time
 import torch
@@ -294,9 +295,9 @@ def train(config: TrainConfig) -> pathlib.Path:
             running[k] = running.get(k, 0.0) + float(losses[k].item())
 
         if step % config.log_every == 0:
-            elapsed = time.time() - start_time
+            elapsed = praxis.time.seconds_to_hms(time.time() - start_time)
             avg = {k: v / config.log_every for k, v in running.items()}
-            log.info(f'step {step:>7d}  total={avg["total"]:.4f}  ' f'sc={avg["stft_sc"]:.4f}  ' f'lmag={avg["stft_log_mag"]:.4f}  ' f'l1={avg["waveform_l1"]:.4f}  ' f'kl={avg["kl"]:.4f}  ' f'β={avg["beta"]:.4f}  ' f'[{elapsed:.1f}s]')
+            log.info(f'step {step:>7d}  total={avg["total"]:.4f}  ' f'sc={avg["stft_sc"]:.4f}  ' f'lmag={avg["stft_log_mag"]:.4f}  ' f'l1={avg["waveform_l1"]:.4f}  ' f'kl={avg["kl"]:.4f}  ' f'β={avg["beta"]:.4f}  ' f'[{elapsed}]')
 
             with log_path.open('a', newline='') as f:
                 csv.writer(f).writerow([step, avg['total'], avg['stft_sc'], avg['stft_log_mag'], avg['waveform_l1'], avg['kl'], avg['beta'], elapsed])
