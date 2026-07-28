@@ -69,6 +69,7 @@ class TrainConfig:
     ckpt_every: int = 5_000
     keep_last_ckpts: int = 3
     seed: int = 42
+    prune_old_checkpoints: bool = False
 
     # reanudar/finetune
     resume_from: pathlib.Path | None = None
@@ -313,7 +314,10 @@ def train(config: TrainConfig) -> pathlib.Path:
         if step % config.ckpt_every == 0:
             ckpt_path = ckpt_dir / f'rave_step{step:08d}.pt'
             _save_checkpoint(ckpt_path, model, optimizer, step, config)
-            _prune_old_checkpoints(ckpt_dir, 'rave_step*.pt', config.keep_last_ckpts)
+
+            if config.prune_old_checkpoints:
+                _prune_old_checkpoints(ckpt_dir, 'rave_step*.pt', config.keep_last_ckpts)
+
             log.info(f'  checkpoint guardado: {ckpt_path.name}')
 
     final_step = start_step + config.n_steps
