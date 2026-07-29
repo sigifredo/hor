@@ -1,20 +1,24 @@
-'''Pérdidas para el VAE tipo RAVE.
+'''Pérdidas para el VAE tipo RAVE, fases 1 y 2.
 
-Componentes:
-    * MultiScaleSTFTLoss: reconstrucción en el dominio tiempo-frecuencia,
-      con spectral convergence y log-magnitud L1 sobre tres escalas FFT.
-    * kl_diagonal_gaussian: KL forma cerrada de N(mu, sigma^2) contra N(0, I).
-    * BetaScheduler: warmup lineal del peso del KL.
-    * RAVELoss: agregador. Devuelve un dict con todos los componentes para
-      logging separado.
+Fase 1 (VAE puro):
+    * MultiScaleSTFTLoss: reconstrucción tiempo-frecuencia.
+    * kl_free_bits: KL con floor por dimensión, evita colapso posterior.
+    * BetaScheduler: warmup lineal.
+    * RAVELoss: agregador de fase 1.
 
-Pesos por defecto:
-    reconstrucción STFT (spectral convergence + log mag) : 1.0
-    reconstrucción dominio tiempo (L1)                   : 0.1
-    KL warmed up hasta β_max = 0.1 en 10_000 pasos
+Fase 2 (adversarial):
+    * hinge_loss_d: hinge para el discriminador.
+    * hinge_loss_g: hinge para el generador.
+    * feature_matching_loss: L1 sobre features intermedios del D real vs fake.
+    * Estas funciones se combinan en engine.py con RAVELoss para producir la
+      loss completa de fase 2.
 
-Estos valores siguen la convención del paper RAVE. Ajustar en tiempo de
-construcción según el balance observado en las curvas de entrenamiento.
+Anti-colapso:
+    * free_bits establece un piso por dimensión sobre la KL, evitando que el
+      modelo apague dimensiones latentes durante el warmup del β. Sigue la
+      formulación de Kingma+ 2016 (improved variational inference).
+    * beta_max por defecto se baja a 1e-4 y warmup_steps sube a 100_000 para
+      corpus pequeños. RAVE original ajusta β en escalas similares.
 '''
 
 from __future__ import annotations
@@ -46,7 +50,7 @@ class MultiScaleSTFTLoss(nn.Module):
         n_fft = self.fft_sizes[idx]
         hop = self.hop_sizes[idx]
         window = getattr(self, f'window_{idx}')
-        x = x.reshape(-1, x.size(-1))  # (B*C, T)
+        x = x.reshape(-1, x.size(-1))
         spec = torch.stft(x, n_fft=n_fft, hop_length=hop, win_length=n_fft, window=window, return_complex=True, center=True, pad_mode='reflect')
         return spec.abs()
 
@@ -65,31 +69,50 @@ class MultiScaleSTFTLoss(nn.Module):
 
 
 def kl_diagonal_gaussian(mu: torch.Tensor, log_sigma: torch.Tensor) -> torch.Tensor:
-    '''KL(N(mu, sigma^2) || N(0, I)) forma cerrada.
-
-    Para gaussianas diagonales:
-        KL = 0.5 * sum_d (mu_d^2 + sigma_d^2 - 1 - 2 log sigma_d)
-
-    Args:
-        mu, log_sigma: tensores de forma (B, D, L).
-
-    Returns:
-        Escalar: suma sobre D, promedio sobre B y L.
-    '''
+    '''KL(N(mu, sigma^2) || N(0, I)) forma cerrada, suma sobre D, promedio B, L.'''
     kl = 0.5 * (mu.pow(2) + torch.exp(2 * log_sigma) - 2 * log_sigma - 1)
     return kl.sum(dim=1).mean()
+
+
+def kl_free_bits(mu: torch.Tensor, log_sigma: torch.Tensor, free_bits: float = 0.0) -> tuple[torch.Tensor, torch.Tensor]:
+    '''KL con piso por dimensión (Kingma+ 2016).
+
+    Args:
+        mu, log_sigma: tensores (B, D, L).
+        free_bits: piso en nats por dimensión. Si <= 0, se comporta como KL
+            estándar (agregada como en kl_diagonal_gaussian).
+
+    Returns:
+        (kl_optimized, kl_raw):
+            kl_optimized es la que entra al backward: max(kl_d, free_bits)
+                sumado sobre D.
+            kl_raw es la KL real sin piso, útil como diagnóstico.
+
+    Nota:
+        La KL por dimensión se promedia sobre batch y tiempo antes de aplicar
+        el piso. Esto sigue la convención habitual en VAEs de audio y evita
+        que dimensiones ocasionalmente ruidosas escapen del clamp.
+    '''
+    kl_per_element = 0.5 * (mu.pow(2) + torch.exp(2 * log_sigma) - 2 * log_sigma - 1)
+    kl_per_dim = kl_per_element.mean(dim=(0, 2))
+    kl_raw = kl_per_dim.sum()
+
+    if free_bits > 0.0:
+        kl_clamped = torch.clamp(kl_per_dim, min=free_bits)
+        kl_optimized = kl_clamped.sum()
+    else:
+        kl_optimized = kl_raw
+
+    return kl_optimized, kl_raw.detach()
 
 
 class BetaScheduler:
     '''Warmup lineal para el peso del KL.
 
     beta(step) = min(1, step / warmup_steps) * beta_max
-
-    No es un nn.Module: se llama con el step actual y se pasa el resultado
-    como peso escalar en el forward de la pérdida agregada.
     '''
 
-    def __init__(self, beta_max: float = 0.1, warmup_steps: int = 10_000):
+    def __init__(self, beta_max: float = 1e-4, warmup_steps: int = 100_000):
         if warmup_steps < 1:
             raise ValueError('warmup_steps debe ser >= 1')
         self.beta_max = float(beta_max)
@@ -108,20 +131,21 @@ class RAVELoss(nn.Module):
         fft_sizes: tamaños FFT para MultiScaleSTFTLoss.
         beta_max: peso final del término KL después del warmup.
         warmup_steps: pasos del warmup lineal para beta.
-        stft_weight: multiplicador del término STFT (spectral convergence +
-            log mag).
+        stft_weight: multiplicador del término STFT.
         waveform_weight: multiplicador del término L1 sobre la forma de onda.
+        free_bits: piso en nats por dimensión para la KL.
 
     forward devuelve un dict con:
-        total, stft_sc, stft_log_mag, waveform_l1, kl, beta
+        total, stft_sc, stft_log_mag, waveform_l1, kl, kl_raw, beta
     '''
 
-    def __init__(self, fft_sizes: tuple[int, ...] = (512, 1024, 2048), beta_max: float = 0.1, warmup_steps: int = 10_000, stft_weight: float = 1.0, waveform_weight: float = 0.1):
+    def __init__(self, fft_sizes: tuple[int, ...] = (512, 1024, 2048), beta_max: float = 1e-4, warmup_steps: int = 100_000, stft_weight: float = 1.0, waveform_weight: float = 0.1, free_bits: float = 0.0):
         super().__init__()
         self.stft = MultiScaleSTFTLoss(fft_sizes)
         self.scheduler = BetaScheduler(beta_max, warmup_steps)
         self.stft_weight = float(stft_weight)
         self.waveform_weight = float(waveform_weight)
+        self.free_bits = float(free_bits)
 
     def forward(self, x: torch.Tensor, x_hat: torch.Tensor, mu: torch.Tensor, log_sigma: torch.Tensor, step: int) -> dict[str, torch.Tensor]:
         stft_terms = self.stft(x, x_hat)
@@ -130,16 +154,76 @@ class RAVELoss(nn.Module):
 
         waveform_l1 = F.l1_loss(x_hat, x)
 
-        kl = kl_diagonal_gaussian(mu, log_sigma)
+        kl_opt, kl_raw = kl_free_bits(mu, log_sigma, self.free_bits)
         beta = self.scheduler(step)
 
-        total = self.stft_weight * (stft_sc + stft_log_mag) + self.waveform_weight * waveform_l1 + beta * kl
+        total = self.stft_weight * (stft_sc + stft_log_mag) + self.waveform_weight * waveform_l1 + beta * kl_opt
 
         return {
             'total': total,
             'stft_sc': stft_sc.detach(),
             'stft_log_mag': stft_log_mag.detach(),
             'waveform_l1': waveform_l1.detach(),
-            'kl': kl.detach(),
+            'kl': kl_opt.detach(),
+            'kl_raw': kl_raw,
             'beta': torch.tensor(beta, device=x.device),
         }
+
+
+def hinge_loss_d(logits_real: list[torch.Tensor], logits_fake: list[torch.Tensor]) -> torch.Tensor:
+    '''Hinge loss para el discriminador multi-escala.
+
+    L_D = E[relu(1 - D(x))] + E[relu(1 + D(x_hat))]
+
+    Args:
+        logits_real: lista de logits por escala evaluados sobre audio real.
+        logits_fake: lista de logits por escala evaluados sobre audio
+            generado (debe pasarse detach para no propagar al generador).
+
+    Returns:
+        Escalar promedio sobre escalas.
+    '''
+    loss = logits_real[0].new_zeros(())
+    for lr, lf in zip(logits_real, logits_fake):
+        loss = loss + F.relu(1.0 - lr).mean() + F.relu(1.0 + lf).mean()
+    return loss / len(logits_real)
+
+
+def hinge_loss_g(logits_fake: list[torch.Tensor]) -> torch.Tensor:
+    '''Hinge loss para el generador (no saturante).
+
+    L_G_adv = -E[D(x_hat)]
+
+    El generador quiere que D(x_hat) sea grande y positivo. Con hinge
+    non-saturating, el gradiente no desaparece cuando D acierta.
+    '''
+    loss = logits_fake[0].new_zeros(())
+    for lf in logits_fake:
+        loss = loss - lf.mean()
+    return loss / len(logits_fake)
+
+
+def feature_matching_loss(features_real: list[list[torch.Tensor]], features_fake: list[list[torch.Tensor]]) -> torch.Tensor:
+    '''L1 sobre feature maps intermedios del D, promediado por capa y escala.
+
+    Args:
+        features_real: features_real[i][j] es el j-ésimo feature de la
+            i-ésima escala evaluado sobre audio real.
+        features_fake: análogo, sobre audio generado.
+
+    Returns:
+        Escalar. Estabiliza el entrenamiento del generador dando gradientes
+        densos incluso cuando la loss adversarial ya está satisfecha.
+    '''
+    if len(features_real) != len(features_fake):
+        raise ValueError('features_real y features_fake deben tener el mismo número de escalas')
+
+    total = features_real[0][0].new_zeros(())
+    n_pairs = 0
+    for feats_r, feats_f in zip(features_real, features_fake):
+        if len(feats_r) != len(feats_f):
+            raise ValueError('discordancia en número de capas dentro de una escala')
+        for fr, ff in zip(feats_r, feats_f):
+            total = total + F.l1_loss(ff, fr.detach())
+            n_pairs += 1
+    return total / max(n_pairs, 1)

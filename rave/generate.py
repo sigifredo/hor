@@ -161,9 +161,15 @@ def print_checkpoint_info(info: dict) -> None:
 
     log.info('Entrenamiento')
 
-    for k in ('sample_rate', 'batch_size', 'lr', 'beta_max', 'warmup_steps', 'grad_clip', 'stft_weight', 'waveform_weight', 'fft_sizes'):
+    for k in ('phase', 'sample_rate', 'batch_size', 'lr', 'beta_max', 'warmup_steps', 'free_bits', 'grad_clip', 'stft_weight', 'waveform_weight', 'fft_sizes'):
         if k in c:
             log.info(f'\t{k:<18} {c[k]}')
+
+    if c.get('phase') == 2:
+        log.info('Adversarial')
+        for k in ('freeze_encoder', 'd_lr', 'adversarial_weight', 'fm_weight', 'd_grad_clip'):
+            if k in c:
+                log.info(f'\t{k:<18} {c[k]}')
 
     if info['segment_seconds']:
         log.info(f'\tsegment_length     {c.get("segment_length")} ({info["segment_seconds"]:.3f} s)')

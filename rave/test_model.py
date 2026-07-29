@@ -7,16 +7,15 @@ Comprueba:
     * Que la reconstrucción con pesos aleatorios no explota (sanity check).
     * Que sample_prior funciona.
 '''
+
 import torch
 
-from model import RAVE
+from .model import RAVE
 
 
 def test_shapes() -> None:
     print('=== Consistencia de formas ===')
-    model = RAVE(n_bands=16, pqmf_taps=126,
-                 hidden_channels=64, strides=(2, 4, 2),
-                 latent_dim=128, n_res_per_block=3)
+    model = RAVE(n_bands=16, pqmf_taps=126, hidden_channels=64, strides=(2, 4, 2), latent_dim=128, n_res_per_block=3)
     model.eval()
 
     total_stride = model.total_stride
@@ -32,19 +31,15 @@ def test_shapes() -> None:
             z = model.reparameterize(mu, log_sigma)
             x_hat = model.decode(z)
         L_z = T // total_stride
-        assert mu.shape == (2, 128, L_z), \
-            f'mu shape {mu.shape} != esperado {(2, 128, L_z)}'
+        assert mu.shape == (2, 128, L_z), f'mu shape {mu.shape} != esperado {(2, 128, L_z)}'
         assert log_sigma.shape == mu.shape
-        assert x_hat.shape == x.shape, \
-            f'x_hat shape {x_hat.shape} != {x.shape}'
+        assert x_hat.shape == x.shape, f'x_hat shape {x_hat.shape} != {x.shape}'
         print(f'  T={T:>5}: mu {tuple(mu.shape)}, x_hat {tuple(x_hat.shape)}')
 
 
 def test_gradient_flow() -> None:
     print('\n=== Flujo de gradientes ===')
-    model = RAVE(n_bands=16, pqmf_taps=126,
-                 hidden_channels=32, strides=(2, 4, 2),
-                 latent_dim=64, n_res_per_block=2)
+    model = RAVE(n_bands=16, pqmf_taps=126, hidden_channels=32, strides=(2, 4, 2), latent_dim=64, n_res_per_block=2)
     x = torch.randn(2, 1, 2048, requires_grad=False)
     x_hat, mu, log_sigma = model(x)
     loss = (x_hat - x).pow(2).mean() + 0.01 * (mu.pow(2) + log_sigma.exp()).mean()
@@ -67,9 +62,7 @@ def test_gradient_flow() -> None:
 
 def test_parameter_count() -> None:
     print('\n=== Conteo de parámetros ===')
-    model = RAVE(n_bands=16, pqmf_taps=126,
-                 hidden_channels=64, strides=(2, 4, 2),
-                 latent_dim=128, n_res_per_block=3)
+    model = RAVE(n_bands=16, pqmf_taps=126, hidden_channels=64, strides=(2, 4, 2), latent_dim=128, n_res_per_block=3)
     counts = model.parameter_count()
     for k, v in counts.items():
         print(f'  {k:>8s}: {v:>12,d}')
@@ -77,9 +70,7 @@ def test_parameter_count() -> None:
 
 def test_sample_prior() -> None:
     print('\n=== sample_prior ===')
-    model = RAVE(n_bands=16, pqmf_taps=126,
-                 hidden_channels=32, strides=(2, 4, 2),
-                 latent_dim=64, n_res_per_block=2)
+    model = RAVE(n_bands=16, pqmf_taps=126, hidden_channels=32, strides=(2, 4, 2), latent_dim=64, n_res_per_block=2)
     model.eval()
     L_z = 32
     audio = model.sample_prior(batch_size=2, length=L_z)
@@ -93,9 +84,7 @@ def test_sample_prior() -> None:
 def test_reconstruction_untrained() -> None:
     print('\n=== Reconstrucción con pesos aleatorios ===')
     torch.manual_seed(0)
-    model = RAVE(n_bands=16, pqmf_taps=126,
-                 hidden_channels=32, strides=(2, 4, 2),
-                 latent_dim=64, n_res_per_block=2)
+    model = RAVE(n_bands=16, pqmf_taps=126, hidden_channels=32, strides=(2, 4, 2), latent_dim=64, n_res_per_block=2)
     model.eval()
     x = torch.randn(1, 1, 4096) * 0.3
     with torch.no_grad():
@@ -104,8 +93,7 @@ def test_reconstruction_untrained() -> None:
     print(f'  x std={x.std().item():.4f}, x_hat std={x_hat.std().item():.4f}')
     print(f'  ratio de pico: {ratio:.4f}')
     if ratio > 100 or ratio < 0.01:
-        print('  ADVERTENCIA: reconstrucción sin entrenar tiene escala '
-              'anómala (esperado si los pesos no están normalizados).')
+        print('  ADVERTENCIA: reconstrucción sin entrenar tiene escala ' 'anómala (esperado si los pesos no están normalizados).')
 
 
 if __name__ == '__main__':
