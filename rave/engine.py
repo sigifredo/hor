@@ -377,7 +377,7 @@ def _train_phase1(config: TrainConfig) -> pathlib.Path:
         if step % config.log_every == 0:
             elapsed = praxis.time.seconds_to_hms(time.time() - start_time)
             avg = {k: v / config.log_every for k, v in running.items()}
-            log.info(f'[fase 1] step {step:>7d}  total={avg["total"]:.4f}  sc={avg["stft_sc"]:.4f}  lmag={avg["stft_log_mag"]:.4f}  l1={avg["waveform_l1"]:.4f}  kl={avg["kl"]:.4f}  kl_raw={avg["kl_raw"]:.4f}  β={avg["beta"]:.6f}')
+            log.info(f'[fase 1] step {step:>7d}  total={avg["total"]:.4f}  sc={avg["stft_sc"]:.4f}  lmag={avg["stft_log_mag"]:.4f}  l1={avg["waveform_l1"]:.4f}  kl={avg["kl"]:.4f}  kl_raw={avg["kl_raw"]:.4f}  β={avg["beta"]:.6f}  elapsed=[{elapsed}]')
             with log_path.open('a', newline='') as f:
                 csv.writer(f).writerow([step, avg['total'], avg['stft_sc'], avg['stft_log_mag'], avg['waveform_l1'], avg['kl'], avg['kl_raw'], avg['beta'], f'{elapsed}'])
             running = {}
